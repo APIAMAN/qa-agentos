@@ -1,8 +1,9 @@
 import asyncio
-from sqlalchemy import select
+
 from qa_agentos.core.database import AsyncSessionLocal
 from qa_agentos.core.security import hash_password
 from qa_agentos.models.domain import Project, User
+from sqlalchemy import select
 
 
 async def bootstrap_demo_data() -> None:

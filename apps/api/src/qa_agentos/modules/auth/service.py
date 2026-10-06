@@ -1,10 +1,8 @@
 import uuid
 from typing import Any, Callable, Coroutine, Optional
+
 from fastapi import Depends, Header
 from fastapi.security import OAuth2PasswordBearer
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from qa_agentos.core.database import get_db
 from qa_agentos.core.errors import ForbiddenError, UnauthorizedError
 from qa_agentos.core.security import (
@@ -14,6 +12,8 @@ from qa_agentos.core.security import (
 )
 from qa_agentos.models.domain import APIKey, User
 from qa_agentos.modules.auth.schemas import Identity
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/v1/auth/token", auto_error=False)
 

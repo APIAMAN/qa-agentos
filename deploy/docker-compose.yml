@@ -1,0 +1,174 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: qa_agentos_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-qa_agentos}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-qa_agentos}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: qa_agentos_redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: cgr.dev/chainguard/minio:latest
+    container_name: qa_agentos_minio
+    restart: always
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "minio", "--version"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  minio-init:
+    image: quay.io/minio/aistor/mc:RELEASE.2025-08-29T21-30-41Z
+    container_name: qa_agentos_minio_init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin};
+      /usr/bin/mc mb --ignore-existing local/${MINIO_BUCKET:-qa-agentos-artifacts};
+      /usr/bin/mc anonymous set download local/${MINIO_BUCKET:-qa-agentos-artifacts};
+      exit 0;
+      "
+
+  hatchet:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-engine:latest
+    container_name: qa_agentos_hatchet
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      HATCHET_DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-qa_agentos}?sslmode=disable
+      SERVER_POSTGRES_PRIMARY_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-qa_agentos}?sslmode=disable
+      SERVER_DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-qa_agentos}?sslmode=disable
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-qa_agentos}?sslmode=disable
+      SERVER_POSTGRES_HOST: postgres
+      SERVER_POSTGRES_PORT: "5432"
+      SERVER_POSTGRES_USERNAME: ${POSTGRES_USER:-postgres}
+      SERVER_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      SERVER_POSTGRES_DATABASE: ${POSTGRES_DB:-qa_agentos}
+      SERVER_AUTH_COOKIE_DOMAIN: localhost
+      SERVER_AUTH_COOKIE_SECRETS: "12345678901234567890123456789012 12345678901234567890123456789012"
+      SERVER_URL: http://localhost:8080
+      SERVER_TASKQUEUE_KIND: postgres
+      SERVER_ENCRYPTION_MASTER_KEYSET_FILE: /hatchet/keys/master.key
+      SERVER_ENCRYPTION_JWT_PRIVATE_KEYSET_FILE: /hatchet/keys/private_ec256.key
+      SERVER_ENCRYPTION_JWT_PUBLIC_KEYSET_FILE: /hatchet/keys/public_ec256.key
+    volumes:
+      - ./hatchet-keys:/hatchet/keys
+    ports:
+      - "7077:7077"
+      - "8080:8080"
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-v1.52.0
+    container_name: qa_agentos_litellm
+    restart: always
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-litellm-dev-master-key}
+      NVIDIA_NIM_API_KEY: ${NVIDIA_NIM_API_KEY:-dev_key}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-dev_key}
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+
+  api:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    container_name: qa_agentos_api
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-qa_agentos}
+      REDIS_URL: redis://redis:6379/0
+      MINIO_ENDPOINT: minio:9000
+    ports:
+      - "8000:8000"
+
+  worker:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    container_name: qa_agentos_worker
+    restart: always
+    command: ["python", "-m", "qa_agentos.workers.main"]
+    depends_on:
+      api:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-qa_agentos}
+      REDIS_URL: redis://redis:6379/0
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+    container_name: qa_agentos_frontend
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://api:8000
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: qa_agentos_caddy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+      - frontend
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  caddy_data:
+  caddy_config:

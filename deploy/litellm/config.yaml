@@ -1,0 +1,18 @@
+model_list:
+  - model_name: planner
+    litellm_params:
+      model: nvidia_nim/meta/llama-3.3-70b-instruct
+      api_base: https://integrate.api.nvidia.com/v1
+      api_key: os.environ/NVIDIA_NIM_API_KEY
+  - model_name: classifier
+    litellm_params:
+      model: gemini/gemini-2.5-flash
+      api_key: os.environ/GEMINI_API_KEY
+  - model_name: mock
+    litellm_params:
+      model: openai/mock
+      api_key: mock-key
+
+router_settings:
+  routing_strategy: usage-based-routing-v2
+  timeout: 30

@@ -1,0 +1,21 @@
+# Local Development Overrides
+# Direct browser -> API (http://localhost:8000) and Frontend (http://localhost:3000)
+
+services:
+  caddy:
+    profiles: ["production-proxy-only"] # Excluded in standard dev up
+
+  api:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    volumes:
+      - ../apps/api/src:/app/src
+    command: ["uvicorn", "qa_agentos.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000

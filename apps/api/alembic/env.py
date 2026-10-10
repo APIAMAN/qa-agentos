@@ -17,13 +17,24 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 
+def include_object(object, name, type_, reflected, compare_to):
+    # Ignore alembic internal tracking table
+    if type_ == "table" and name == "alembic_version":
+        return False
+    # Ignore non-public schemas (e.g. langgraph checkpoint schema or system schemas)
+    if hasattr(object, "schema") and object.schema and object.schema != "public":
+        return False
+    return True
+
+
 def run_migrations_offline() -> None:
-    url = settings.DATABASE_URL
+    url = config.get_main_option("sqlalchemy.url") or settings.DATABASE_URL
     context.configure(
         url=url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        include_object=include_object,
     )
 
     with context.begin_transaction():
@@ -31,7 +42,11 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        include_object=include_object,
+    )
 
     with context.begin_transaction():
         context.execute("CREATE EXTENSION IF NOT EXISTS vector;")
@@ -40,7 +55,8 @@ def do_run_migrations(connection: Connection) -> None:
 
 async def run_async_migrations() -> None:
     configuration = config.get_section(config.config_ini_section, {})
-    configuration["sqlalchemy.url"] = settings.DATABASE_URL
+    url = config.get_main_option("sqlalchemy.url") or settings.DATABASE_URL
+    configuration["sqlalchemy.url"] = url
     connectable = async_engine_from_config(
         configuration,
         prefix="sqlalchemy.",

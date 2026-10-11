@@ -8,10 +8,11 @@ model_list:
     litellm_params:
       model: gemini/gemini-2.5-flash
       api_key: os.environ/GEMINI_API_KEY
-  - model_name: mock
+  - model_name: mock-json
     litellm_params:
-      model: openai/mock
+      model: gpt-3.5-turbo
       api_key: mock-key
+      mock_response: '{"summary": "Mock test summary", "coverage_analysis": {"requirements_covered": ["REQ-1"], "edge_cases_identified": ["EDGE-1"]}, "test_cases": [{"id": "TC-001", "title": "Mock Test", "description": "Verify mock operation", "type": "functional", "priority": "high", "preconditions": [], "steps": ["step 1"], "expected_result": "success", "tags": ["mock"]}]}'
 
 router_settings:
   routing_strategy: usage-based-routing-v2

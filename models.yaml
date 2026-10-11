@@ -1,0 +1,48 @@
+models:
+  - name: meta/llama-3.3-70b-instruct
+    provider: nvidia_nim
+    gateway_model_key: planner
+    capabilities:
+      - reasoning
+      - code
+      - json
+      - planner
+    priority: 0
+    structured_output: true
+    context_window: 131072
+    max_output_tokens: 4096
+    cost_input_per_1m: 0.70
+    cost_output_per_1m: 0.90
+    status: available
+
+  - name: gemini-2.5-flash
+    provider: gemini
+    gateway_model_key: classifier
+    capabilities:
+      - classifier
+      - json
+      - reasoning
+    priority: 0
+    structured_output: true
+    context_window: 1048576
+    max_output_tokens: 8192
+    cost_input_per_1m: 0.075
+    cost_output_per_1m: 0.30
+    status: available
+
+  - name: mock-json
+    provider: mock
+    gateway_model_key: mock-json
+    capabilities:
+      - test
+      - json
+      - mock
+      - reasoning
+      - planner
+    priority: 10
+    structured_output: true
+    context_window: 32768
+    max_output_tokens: 2048
+    cost_input_per_1m: 0.0
+    cost_output_per_1m: 0.0
+    status: available

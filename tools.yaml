@@ -1,0 +1,46 @@
+tools:
+  - name: util.echo
+    version: 1.0.0
+    description: Echoes back the input message and metadata for testing and connectivity verification.
+    kind: builtin
+    implementation: qa_agentos.tools.builtin.util:echo
+    permissions: []
+    timeout_ms: 10000
+    retry_policy:
+      max_attempts: 2
+      backoff: exponential
+    idempotent: true
+    status: active
+    input_schema:
+      $schema: "https://json-schema.org/draft/2020-12/schema"
+      title: UtilEchoInput
+      type: object
+      required:
+        - message
+      properties:
+        message:
+          type: string
+          description: Message payload to be echoed back.
+        metadata:
+          type: object
+          description: Optional arbitrary metadata to echo.
+      additionalProperties: false
+    output_schema:
+      $schema: "https://json-schema.org/draft/2020-12/schema"
+      title: UtilEchoOutput
+      type: object
+      required:
+        - echoed_message
+        - timestamp
+      properties:
+        echoed_message:
+          type: string
+          description: Echoed message payload.
+        timestamp:
+          type: string
+          format: date-time
+          description: ISO timestamp of echo execution.
+        metadata:
+          type: object
+          description: Echoed metadata payload.
+      additionalProperties: false

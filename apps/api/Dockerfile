@@ -12,6 +12,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY apps/api /app
+COPY agents /app/agents
+COPY prompts /app/prompts
+COPY models.yaml /app/models.yaml
+COPY tools.yaml /app/tools.yaml
 RUN pip install --no-cache-dir .
 
 ENV PYTHONPATH=/app/src

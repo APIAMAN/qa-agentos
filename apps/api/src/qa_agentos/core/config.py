@@ -1,5 +1,6 @@
-from typing import Optional
+from typing import FrozenSet, Optional
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,7 +32,17 @@ class Settings(BaseSettings):
 
     # LiteLLM Gateway
     LITELLM_ENDPOINT: str = "http://localhost:4000"
-    LITELLM_MASTER_KEY: str = "sk-litellm-dev-master-key"
+    LITELLM_MASTER_KEY: SecretStr = SecretStr("sk-litellm-dev-master-key")
+    LITELLM_TIMEOUT_SECONDS: float = 60.0
+
+    # Model provider allowlist (comma-separated provider identifiers from models.yaml).
+    # Secure default: real providers only. The "mock" provider is additionally
+    # restricted to ENVIRONMENT == "test" by the model resolver, even if listed here.
+    MODEL_PROVIDER_ALLOWLIST: str = "nvidia_nim,gemini"
+
+    @property
+    def model_provider_allowlist(self) -> FrozenSet[str]:
+        return frozenset(p.strip() for p in self.MODEL_PROVIDER_ALLOWLIST.split(",") if p.strip())
 
     model_config = SettingsConfigDict(
         env_file=".env",

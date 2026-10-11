@@ -1,0 +1,149 @@
+slug: test-case-generator
+name: Test Case Generator
+description: >
+  Generates comprehensive, structured test suites from software requirements,
+  user stories, and API specifications with boundary, edge-case, and negative test coverage.
+kind: generic_react
+version: 1.0.0
+status: active
+prompt_file: prompts/test-case-generator/1.0.0.md
+
+parameters:
+  temperature: 0.1
+  max_repairs: 2
+  max_steps: 10
+
+permissions:
+  - artifact:write
+
+allowed_tools: []
+
+model_requirements:
+  planner:
+    capabilities:
+      - reasoning
+      - json
+    min_context_window: 32000
+    structured_output: true
+
+input_schema:
+  $schema: "https://json-schema.org/draft/2020-12/schema"
+  title: TestCaseGeneratorInput
+  type: object
+  required:
+    - requirements
+  properties:
+    requirements:
+      type: string
+      description: Software specification, user story, or acceptance criteria to generate tests for.
+    context:
+      type: string
+      description: Optional architecture, tech stack, or testing guidelines.
+    test_types:
+      type: array
+      items:
+        type: string
+        enum:
+          - functional
+          - integration
+          - e2e
+          - security
+          - boundary
+          - negative
+      description: Specific categories of tests to produce.
+    format:
+      type: string
+      enum:
+        - json
+        - gherkin
+        - markdown
+      default: json
+      description: Desired test case representation format.
+  additionalProperties: false
+
+output_schema:
+  $schema: "https://json-schema.org/draft/2020-12/schema"
+  title: TestCaseGeneratorOutput
+  type: object
+  required:
+    - summary
+    - coverage_analysis
+    - test_cases
+  properties:
+    summary:
+      type: string
+      description: High-level overview of the test suite and approach.
+    coverage_analysis:
+      type: object
+      required:
+        - requirements_covered
+        - edge_cases_identified
+      properties:
+        requirements_covered:
+          type: array
+          items:
+            type: string
+        edge_cases_identified:
+          type: array
+          items:
+            type: string
+        risk_areas:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+    test_cases:
+      type: array
+      items:
+        type: object
+        required:
+          - id
+          - title
+          - description
+          - type
+          - priority
+          - preconditions
+          - steps
+          - expected_result
+        properties:
+          id:
+            type: string
+            description: Unique test case identifier (e.g. TC-001).
+          title:
+            type: string
+            description: Concise title describing the test scenario.
+          description:
+            type: string
+            description: Detailed test scenario description and objective.
+          type:
+            type: string
+            enum:
+              - functional
+              - integration
+              - e2e
+              - security
+              - boundary
+              - negative
+          priority:
+            type: string
+            enum:
+              - critical
+              - high
+              - medium
+              - low
+          preconditions:
+            type: array
+            items:
+              type: string
+          steps:
+            type: array
+            items:
+              type: string
+          expected_result:
+            type: string
+          tags:
+            type: array
+            items:
+              type: string
+        additionalProperties: false
+  additionalProperties: false

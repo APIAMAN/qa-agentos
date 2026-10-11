@@ -9,7 +9,7 @@ from sqlalchemy import create_engine, text
 
 def test_migration_0002_preserves_m0_data(postgres_test_url: str):
     """Verify that migration 0002 preserves existing M0 data, backfills fields safely, and supports symmetric downgrade."""
-    admin_url = postgres_test_url.replace("+asyncpg", "+psycopg2")
+    admin_url = postgres_test_url.replace("+asyncpg", "+psycopg")
     base_admin_url = admin_url.rsplit("/", 1)[0] + "/postgres"
 
     db_name = "qa_agentos_m0_data_test"

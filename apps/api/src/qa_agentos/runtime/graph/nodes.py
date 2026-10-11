@@ -1,0 +1,319 @@
+"""Graph node implementations for the generic LangGraph agent runtime.
+
+Implements prepare, generate, execute_tools, validate_output, repair, and finalize
+nodes with strict JSON Schema validation, tool dispatching, and self-repair loops.
+"""
+
+from __future__ import annotations
+
+import json
+import uuid
+from typing import Any, Dict, List, Optional
+
+import jsonschema
+from langchain_core.runnables import RunnableConfig
+
+from qa_agentos.runtime.gateway.client import (
+    ChatMessage,
+    LiteLLMClient,
+    StructuredOutputSpec,
+)
+from qa_agentos.runtime.gateway.resolution import ResolvedModel
+from qa_agentos.runtime.graph.state import AgentState
+from qa_agentos.runtime.tools.dispatcher import (
+    ToolDispatcher,
+    ToolExecutionContext,
+    ToolInvocationRequest,
+)
+
+
+def _format_user_prompt(input_payload: Dict[str, Any]) -> str:
+    """Format input payload into the initial user prompt."""
+    return f"Input Requirements & Specifications:\n```json\n{json.dumps(input_payload, indent=2)}\n```"
+
+
+async def prepare_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+    """Initialize agent messages and execution state."""
+    configurable = config.get("configurable", {})
+    resolved_model = state.get("resolved_model") or configurable.get("resolved_model")
+
+    updates: Dict[str, Any] = {
+        "step_count": state.get("step_count", 0),
+        "repair_count": state.get("repair_count", 0),
+        "max_repairs": state.get("parameters", {}).get("max_repairs", 2),
+        "max_steps": state.get("parameters", {}).get("max_steps", 10),
+        "tokens_input": state.get("tokens_input", 0),
+        "tokens_output": state.get("tokens_output", 0),
+        "model_calls_count": state.get("model_calls_count", 0),
+        "status": "running",
+    }
+
+    if resolved_model:
+        updates["resolved_model"] = resolved_model
+
+    # Initialize messages if not already present
+    if not state.get("messages"):
+        messages: List[Dict[str, str]] = []
+        prompt_template = state.get("prompt_template", "")
+        if prompt_template:
+            messages.append({"role": "system", "content": prompt_template})
+
+        input_payload = state.get("input_payload", {})
+        messages.append({"role": "user", "content": _format_user_prompt(input_payload)})
+        updates["messages"] = messages
+
+    return updates
+
+
+async def generate_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+    """Execute model generation via LiteLLM client."""
+    configurable = config.get("configurable", {})
+    client: LiteLLMClient = configurable["litellm_client"]
+    resolved_model_dict = state.get("resolved_model") or configurable.get("resolved_model")
+
+    if isinstance(resolved_model_dict, ResolvedModel):
+        resolved_model = resolved_model_dict
+    elif isinstance(resolved_model_dict, dict):
+        model_id_val = resolved_model_dict.get("model_id") or resolved_model_dict.get("catalog_id")
+        resolved_model = ResolvedModel(
+            capability=resolved_model_dict.get("capability", "planner"),
+            model_id=uuid.UUID(str(model_id_val)) if model_id_val else uuid.uuid4(),
+            provider=resolved_model_dict["provider"],
+            name=resolved_model_dict.get("name") or resolved_model_dict.get("model_name", "mock-model"),
+            gateway_model_key=resolved_model_dict["gateway_model_key"],
+            capabilities=tuple(resolved_model_dict.get("capabilities", ["reasoning", "json"])),
+            structured_output=resolved_model_dict.get("structured_output", True),
+            context_window=resolved_model_dict.get("context_window", 128000),
+            max_output_tokens=resolved_model_dict.get("max_output_tokens"),
+            priority=resolved_model_dict.get("priority", 1),
+        )
+    else:
+        raise ValueError("No valid resolved_model provided in state or config")
+
+    # Build ChatMessage sequence
+    chat_messages = [ChatMessage(role=m["role"], content=m["content"]) for m in state.get("messages", [])]
+
+    # Structured output spec if output_schema is provided
+    output_schema = state.get("output_schema")
+    structured_output: Optional[StructuredOutputSpec] = None
+    if output_schema:
+        schema_name = f"{state.get('agent_slug', 'agent')}_output".replace("-", "_")
+        structured_output = StructuredOutputSpec(
+            name=schema_name,
+            schema=output_schema,
+            strict=True,
+        )
+
+    # Call model gateway
+    result = await client.chat_completion(
+        model=resolved_model,
+        messages=chat_messages,
+        temperature=state.get("parameters", {}).get("temperature", 0.1),
+        structured_output=structured_output,
+    )
+
+    # Track tokens and usage
+    prompt_tokens = result.usage.prompt_tokens if result.usage else 0
+    completion_tokens = result.usage.completion_tokens if result.usage else 0
+    new_tokens_input = state.get("tokens_input", 0) + (prompt_tokens or 0)
+    new_tokens_output = state.get("tokens_output", 0) + (completion_tokens or 0)
+    new_model_calls_count = state.get("model_calls_count", 0) + 1
+    new_step_count = state.get("step_count", 0) + 1
+
+    # Append assistant response to messages
+    updated_messages = list(state.get("messages", []))
+    updated_messages.append({"role": "assistant", "content": result.content})
+
+    # Check for tool call requests or parse output
+    pending_tool_calls: List[Dict[str, Any]] = []
+    parsed_output: Optional[Dict[str, Any]] = None
+
+    try:
+        raw_parsed = json.loads(result.content)
+        if isinstance(raw_parsed, dict):
+            # Check if this is a tool invocation request
+            if "tool_calls" in raw_parsed and isinstance(raw_parsed["tool_calls"], list):
+                pending_tool_calls = raw_parsed["tool_calls"]
+            elif "tool" in raw_parsed and "args" in raw_parsed:
+                pending_tool_calls = [
+                    {
+                        "tool": raw_parsed["tool"],
+                        "version": raw_parsed.get("version", "1.0.0"),
+                        "input_data": raw_parsed["args"],
+                    }
+                ]
+            else:
+                parsed_output = raw_parsed
+        else:
+            parsed_output = None
+    except Exception:
+        parsed_output = None
+
+    # Step callback hook for persistence if configured
+    step_hook = configurable.get("on_step_completed")
+    if step_hook and callable(step_hook):
+        await step_hook(
+            step_type="planner",
+            node="generate",
+            step_number=new_step_count,
+            input_data={"messages_count": len(chat_messages)},
+            output_data={"raw_response": result.content},
+            tokens_input=prompt_tokens or 0,
+            tokens_output=completion_tokens or 0,
+            gateway_model_key=resolved_model.gateway_model_key,
+        )
+
+    return {
+        "raw_response": result.content,
+        "parsed_output": parsed_output,
+        "pending_tool_calls": pending_tool_calls,
+        "messages": updated_messages,
+        "tokens_input": new_tokens_input,
+        "tokens_output": new_tokens_output,
+        "model_calls_count": new_model_calls_count,
+        "step_count": new_step_count,
+    }
+
+
+def route_after_generate(state: AgentState) -> str:
+    """Conditional edge after generation."""
+    if state.get("pending_tool_calls"):
+        return "execute_tools"
+    return "validate_output"
+
+
+async def execute_tools_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+    """Execute requested tool calls via ToolDispatcher."""
+    configurable = config.get("configurable", {})
+    dispatcher: Optional[ToolDispatcher] = configurable.get("tool_dispatcher")
+    agent_version_entity = configurable.get("agent_version_entity")
+    if agent_version_entity is None:
+        raise RuntimeError("No AgentVersion entity provided in runtime config")
+
+    pending_calls = state.get("pending_tool_calls", [])
+    updated_messages = list(state.get("messages", []))
+    new_step_count = state.get("step_count", 0)
+
+    for call in pending_calls:
+        tool_name = call.get("tool") or call.get("name") or ""
+        tool_version = call.get("version", "1.0.0")
+        input_data = call.get("input_data") or call.get("args") or {}
+        new_step_count += 1
+
+        context = ToolExecutionContext(
+            run_id=uuid.UUID(state["run_id"]) if state.get("run_id") else uuid.uuid4(),
+            step_number=new_step_count,
+            project_id=uuid.UUID(state["project_id"]) if state.get("project_id") else uuid.uuid4(),
+            agent_version=agent_version_entity,
+            granted_permissions=state.get("permissions", []),
+        )
+        request = ToolInvocationRequest(
+            tool_name=tool_name,
+            tool_version=tool_version,
+            input_data=input_data,
+        )
+
+        try:
+            if dispatcher is None:
+                raise RuntimeError("No ToolDispatcher provided in runtime config")
+            result = await dispatcher.dispatch(request, context)
+            updated_messages.append(
+                {
+                    "role": "user",
+                    "content": f"Tool '{tool_name}' result:\n```json\n{json.dumps(result.output_data, indent=2)}\n```",
+                }
+            )
+        except Exception as exc:
+            updated_messages.append(
+                {
+                    "role": "user",
+                    "content": f"Tool '{tool_name}' failed with error: {str(exc)}",
+                }
+            )
+
+    return {
+        "messages": updated_messages,
+        "pending_tool_calls": [],
+        "step_count": new_step_count,
+    }
+
+
+async def validate_output_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+    """Validate generated output against the agent output schema."""
+    output_schema = state.get("output_schema")
+    parsed_output = state.get("parsed_output")
+    repair_count = state.get("repair_count", 0)
+    max_repairs = state.get("max_repairs", 2)
+
+    errors: List[str] = []
+
+    if parsed_output is None:
+        errors.append("Response is not valid JSON or could not be parsed into an object.")
+    elif output_schema:
+        validator = jsonschema.Draft202012Validator(output_schema)
+        schema_errors = list(validator.iter_errors(parsed_output))
+        for err in schema_errors:
+            loc = f"at '{'.'.join(str(p) for p in err.path)}': " if err.path else ""
+            errors.append(f"{loc}{err.message}")
+
+    if not errors:
+        # Schema valid!
+        return {
+            "status": "succeeded",
+            "final_output": parsed_output,
+            "error_code": None,
+            "error_message": None,
+            "error_details": None,
+        }
+
+    # Validation errors detected
+    if repair_count < max_repairs:
+        # Initiate repair
+        new_repair_count = repair_count + 1
+        error_bullets = "\n".join(f"- {e}" for e in errors)
+        repair_prompt = (
+            f"Your previous response did not adhere to the required output schema ({len(errors)} error(s)):\n"
+            f"{error_bullets}\n\n"
+            "Please fix all schema violations and produce a strictly schema-compliant JSON response."
+        )
+        updated_messages = list(state.get("messages", []))
+        updated_messages.append({"role": "user", "content": repair_prompt})
+
+        return {
+            "repair_count": new_repair_count,
+            "messages": updated_messages,
+            "status": "running",
+            "error_code": "OUTPUT_SCHEMA_INVALID",
+            "error_message": f"Schema validation failed on attempt {repair_count + 1}",
+            "error_details": {"validation_errors": errors},
+        }
+
+    # Repair attempts exhausted
+    return {
+        "status": "failed",
+        "error_code": "OUTPUT_SCHEMA_INVALID",
+        "error_message": f"Output schema validation failed after {repair_count} repair attempts.",
+        "error_details": {
+            "validation_errors": errors,
+            "repair_attempts": repair_count,
+            "raw_response": state.get("raw_response"),
+        },
+    }
+
+
+def route_after_validate(state: AgentState) -> str:
+    """Route to finalize if terminal, or repair if another attempt is permitted."""
+    status = state.get("status")
+    if status in ("succeeded", "failed"):
+        return "finalize"
+    return "repair"
+
+
+async def repair_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+    """Repair transition node routing back to generation."""
+    return {"status": "running"}
+
+
+async def finalize_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+    """Terminal state finalizer."""
+    return {}

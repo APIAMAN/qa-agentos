@@ -23,6 +23,7 @@ from qa_agentos.models.domain import (
     RunStep,
 )
 from qa_agentos.runtime.events import (
+    TERMINAL_STATUSES,
     RunStateManager,
     RunTerminalStateError,
     utc_now,
@@ -95,9 +96,14 @@ class RunExecutor:
         agent_slug = agent_def.slug if agent_def else "agent"
 
         # 4. Handle initial transitions if run is currently queued
+        await self.session.refresh(run, ["status"])
+        if run.status in TERMINAL_STATUSES:
+            return RunExecutionResult(run_id=run.id, status=run.status)
+
         is_resuming = run.status == "running"
         if run.status == "queued":
             await state_mgr.transition_to("preparing")
+            await self.session.commit()
 
             # Validate input payload against agent_version.input_schema
             validator = jsonschema.Draft202012Validator(agent_version.input_schema)
@@ -162,6 +168,7 @@ class RunExecutor:
 
             # Transition preparing -> running
             await state_mgr.transition_to("running")
+            await self.session.commit()
         else:
             # Resuming run: load pre-resolved model from run row
             if run.resolved_models and "planner" in run.resolved_models:
@@ -274,7 +281,20 @@ class RunExecutor:
                 },
             )
 
-        final_state: Dict[str, Any] = await compiled_graph.ainvoke(graph_input, config=runnable_config)
+        final_state: Dict[str, Any] = {}
+        async for state_snapshot in compiled_graph.astream(graph_input, config=runnable_config, stream_mode="values"):
+            final_state = state_snapshot
+            await self.session.commit()
+            await self.session.refresh(run, ["status"])
+            if run.status in TERMINAL_STATUSES:
+                return RunExecutionResult(
+                    run_id=run.id,
+                    status=run.status,
+                    tokens_input=final_state.get("tokens_input", 0),
+                    tokens_output=final_state.get("tokens_output", 0),
+                    model_calls_count=final_state.get("model_calls_count", 0),
+                    repair_count=final_state.get("repair_count", 0),
+                )
 
         # 8. Check if graph was interrupted
         if interrupt_after:
@@ -292,6 +312,16 @@ class RunExecutor:
                 )
 
         # 9. Handle terminal state
+        await self.session.refresh(run, ["status"])
+        if run.status in TERMINAL_STATUSES:
+            return RunExecutionResult(
+                run_id=run.id,
+                status=run.status,
+                tokens_input=final_state.get("tokens_input", 0),
+                tokens_output=final_state.get("tokens_output", 0),
+                model_calls_count=final_state.get("model_calls_count", 0),
+                repair_count=final_state.get("repair_count", 0),
+            )
         status = final_state.get("status")
         tokens_in = final_state.get("tokens_input", 0)
         tokens_out = final_state.get("tokens_output", 0)
@@ -305,6 +335,7 @@ class RunExecutor:
                 "succeeded",
                 payload={"summary": final_out.get("summary") if final_out else ""},
             )
+            await self.session.commit()
             return RunExecutionResult(
                 run_id=run.id,
                 status="succeeded",
@@ -326,6 +357,7 @@ class RunExecutor:
                     "error_details": err_details,
                 },
             )
+            await self.session.commit()
             return RunExecutionResult(
                 run_id=run.id,
                 status="failed",

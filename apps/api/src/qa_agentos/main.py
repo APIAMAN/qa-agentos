@@ -9,15 +9,17 @@ from qa_agentos.core.errors import APIError, api_error_handler
 from qa_agentos.core.logging import logger, setup_logging
 from qa_agentos.modules.auth.router import router as auth_router
 from qa_agentos.modules.projects.router import router as projects_router
-from qa_agentos.modules.runs.dispatcher import InlineDispatcher, set_dispatcher
+from qa_agentos.modules.runs.dispatcher import get_dispatcher, set_dispatcher
 from qa_agentos.modules.runs.router import router as runs_router
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     setup_logging()
-    logger.info("QA AgentOS Control Plane starting up", environment=settings.ENVIRONMENT)
-    dispatcher = InlineDispatcher.from_settings(settings)
+    logger.info(
+        "QA AgentOS Control Plane starting up", environment=settings.ENVIRONMENT, dispatcher=settings.RUN_DISPATCHER
+    )
+    dispatcher = get_dispatcher()
     set_dispatcher(dispatcher)
     yield
     logger.info("QA AgentOS Control Plane shutting down")
@@ -55,4 +57,5 @@ async def health_check() -> Dict[str, str]:
         "status": "healthy",
         "service": "qa-agentos-api",
         "environment": settings.ENVIRONMENT,
+        "dispatcher": settings.RUN_DISPATCHER,
     }

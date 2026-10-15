@@ -34,7 +34,16 @@ def _format_user_prompt(input_payload: Dict[str, Any]) -> str:
 
 async def prepare_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Initialize agent messages and execution state."""
+    import asyncio
+
+    from qa_agentos.core.config import settings
+
     configurable = config.get("configurable", {})
+    assigned_attempt = configurable.get("assigned_attempt", 1)
+    debug_delay = state.get("parameters", {}).get("debug_delay_seconds", 0)
+    if debug_delay and assigned_attempt == 1 and settings.ENVIRONMENT != "production":
+        await asyncio.sleep(float(debug_delay))
+
     resolved_model = state.get("resolved_model") or configurable.get("resolved_model")
 
     updates: Dict[str, Any] = {

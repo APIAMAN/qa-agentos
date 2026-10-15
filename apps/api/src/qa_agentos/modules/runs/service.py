@@ -21,7 +21,7 @@ from qa_agentos.models.domain import (
     RunStep,
 )
 from qa_agentos.modules.auth.schemas import Identity
-from qa_agentos.modules.runs.dispatcher import InlineDispatcher
+from qa_agentos.modules.runs.dispatcher import RunDispatcher
 from qa_agentos.modules.runs.schemas import RunCreateRequest
 from qa_agentos.runtime.events import TERMINAL_STATUSES, RunStateManager, utc_now
 from qa_agentos.runtime.gateway.errors import NoModelForCapabilityError
@@ -71,7 +71,7 @@ class RunsService:
         identity: Identity,
         payload: RunCreateRequest,
         idempotency_key: Optional[str] = None,
-        dispatcher: Optional[InlineDispatcher] = None,
+        dispatcher: Optional[RunDispatcher] = None,
         x_project_id: Optional[uuid.UUID] = None,
     ) -> Tuple[Run, bool]:
         """Intake and validate a run request, applying strict idempotency rules.
@@ -294,7 +294,7 @@ class RunsService:
         run_id: uuid.UUID,
         project_id: uuid.UUID,
         identity: Identity,
-        dispatcher: Optional[InlineDispatcher] = None,
+        dispatcher: Optional[RunDispatcher] = None,
     ) -> Run:
         """Guarded cancellation for queued or running runs with race condition recovery."""
         run = await RunsService.get_run(db, run_id, project_id)
@@ -327,7 +327,7 @@ class RunsService:
         project_id: uuid.UUID,
         identity: Identity,
         re_resolve: bool = False,
-        dispatcher: Optional[InlineDispatcher] = None,
+        dispatcher: Optional[RunDispatcher] = None,
     ) -> Run:
         """Create a new run replaying an existing run's version and input."""
         original_run = await RunsService.get_run(db, run_id, project_id)

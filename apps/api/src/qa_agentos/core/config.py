@@ -1,6 +1,6 @@
 from typing import FrozenSet, Optional
 
-from pydantic import SecretStr
+from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,8 +12,8 @@ class Settings(BaseSettings):
     # Security & Auth
     SECRET_KEY: str = "dev-secret-key-change-this-in-production-min-32-chars-long"
     JWT_ALGORITHM: str = "RS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 # 24 hours
-    
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
+
     RSA_PRIVATE_KEY_PEM: Optional[str] = None
     RSA_PUBLIC_KEY_PEM: Optional[str] = None
 
@@ -40,14 +40,39 @@ class Settings(BaseSettings):
     # restricted to ENVIRONMENT == "test" by the model resolver, even if listed here.
     MODEL_PROVIDER_ALLOWLIST: str = "nvidia_nim,gemini"
 
+    # Dispatcher Configuration
+    RUN_DISPATCHER: str = "inline"  # "inline" or "hatchet"
+
+    # Hatchet Durable Execution Configuration
+    HATCHET_CLIENT_TOKEN: Optional[SecretStr] = None
+    HATCHET_CLIENT_HOST_PORT: Optional[str] = "localhost:7077"
+    HATCHET_CLIENT_SERVER_URL: Optional[str] = "http://localhost:8080"
+    HATCHET_CLIENT_TENANT_ID: Optional[str] = None
+    HATCHET_CLIENT_TLS_STRATEGY: str = "none"  # "none", "tls", or "mtls"
+    HATCHET_WORKER_CONCURRENCY: int = 10
+    HATCHET_TASK_TIMEOUT_MINUTES: int = 15
+    HATCHET_TASK_RETRIES: int = 2
+    HATCHET_SWEEPER_INTERVAL_SECONDS: int = 60
+    HATCHET_SWEEPER_THRESHOLD_SECONDS: int = 30
+
     @property
     def model_provider_allowlist(self) -> FrozenSet[str]:
         return frozenset(p.strip() for p in self.MODEL_PROVIDER_ALLOWLIST.split(",") if p.strip())
 
+    @model_validator(mode="after")
+    def validate_dispatcher_configuration(self) -> "Settings":
+        if self.RUN_DISPATCHER.lower() == "hatchet":
+            if not self.HATCHET_CLIENT_TOKEN or not self.HATCHET_CLIENT_TOKEN.get_secret_value().strip():
+                raise ValueError(
+                    "RUN_DISPATCHER is configured as 'hatchet', but HATCHET_CLIENT_TOKEN is not set or empty. "
+                    "A valid Hatchet client token is required for durable task execution."
+                )
+        return self
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
-        extra="ignore"
+        extra="ignore",
     )
 
 

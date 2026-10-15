@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from qa_agentos.core.database import get_db
 from qa_agentos.modules.auth.schemas import Identity
 from qa_agentos.modules.auth.service import require_scope
-from qa_agentos.modules.runs.dispatcher import InlineDispatcher, get_dispatcher
+from qa_agentos.modules.runs.dispatcher import RunDispatcher, get_dispatcher
 from qa_agentos.modules.runs.schemas import (
     RunCreateRequest,
     RunListResponse,
@@ -31,7 +31,7 @@ async def create_run(
     identity: Identity = Depends(require_scope("runs:create")),
     idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
     x_project_id: Optional[uuid.UUID] = Header(None, alias="X-Project-Id"),
-    dispatcher: InlineDispatcher = Depends(get_dispatcher),
+    dispatcher: RunDispatcher = Depends(get_dispatcher),
 ) -> Response:
     """Create and schedule an agent run, with deterministic idempotency support."""
     run, is_existing = await RunsService.create_run(
@@ -106,7 +106,7 @@ async def cancel_run(
     db: AsyncSession = Depends(get_db),
     identity: Identity = Depends(require_scope("runs:create")),
     x_project_id: Optional[uuid.UUID] = Header(None, alias="X-Project-Id"),
-    dispatcher: InlineDispatcher = Depends(get_dispatcher),
+    dispatcher: RunDispatcher = Depends(get_dispatcher),
 ) -> RunResponse:
     """Cancel a queued or running run."""
     project_id = await resolve_project_id(db, identity, x_project_id)
@@ -127,7 +127,7 @@ async def replay_run(
     db: AsyncSession = Depends(get_db),
     identity: Identity = Depends(require_scope("runs:create")),
     x_project_id: Optional[uuid.UUID] = Header(None, alias="X-Project-Id"),
-    dispatcher: InlineDispatcher = Depends(get_dispatcher),
+    dispatcher: RunDispatcher = Depends(get_dispatcher),
 ) -> RunResponse:
     """Replay an existing run with identical parameters and pinned or re-resolved models."""
     project_id = await resolve_project_id(db, identity, x_project_id)

@@ -1,0 +1,19 @@
+model_list:
+  - model_name: planner
+    litellm_params:
+      model: gpt-3.5-turbo
+      api_key: mock-key
+      mock_response: '{"summary": "Live integration test summary", "coverage_analysis": {"requirements_covered": ["REQ-LIVE-1"], "edge_cases_identified": ["EDGE-LIVE-1"]}, "test_cases": [{"id": "TC-LIVE-001", "title": "Live Hatchet Test", "description": "Verified through live Hatchet worker", "type": "functional", "priority": "high", "preconditions": [], "steps": ["Dispatch to Hatchet", "Worker picks up", "LiteLLM responds"], "expected_result": "succeeded", "tags": ["live-hatchet"]}]}'
+  - model_name: nvidia_nim/meta/llama-3.3-70b-instruct
+    litellm_params:
+      model: gpt-3.5-turbo
+      api_key: mock-key
+      mock_response: '{"summary": "Live integration test summary", "coverage_analysis": {"requirements_covered": ["REQ-LIVE-1"], "edge_cases_identified": ["EDGE-LIVE-1"]}, "test_cases": [{"id": "TC-LIVE-001", "title": "Live Hatchet Test", "description": "Verified through live Hatchet worker", "type": "functional", "priority": "high", "preconditions": [], "steps": ["Dispatch to Hatchet", "Worker picks up", "LiteLLM responds"], "expected_result": "succeeded", "tags": ["live-hatchet"]}]}'
+  - model_name: mock-json
+    litellm_params:
+      model: gpt-3.5-turbo
+      api_key: mock-key
+      mock_response: '{"summary": "Live integration test summary", "coverage_analysis": {"requirements_covered": ["REQ-LIVE-1"], "edge_cases_identified": ["EDGE-LIVE-1"]}, "test_cases": [{"id": "TC-LIVE-001", "title": "Live Hatchet Test", "description": "Verified through live Hatchet worker", "type": "functional", "priority": "high", "preconditions": [], "steps": ["Dispatch to Hatchet", "Worker picks up", "LiteLLM responds"], "expected_result": "succeeded", "tags": ["live-hatchet"]}]}'
+
+router_settings:
+  timeout: 30

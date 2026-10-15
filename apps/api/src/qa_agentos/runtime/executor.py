@@ -13,7 +13,9 @@ from typing import Any, Dict, Optional, Sequence, cast
 import jsonschema
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from structlog import get_logger
 
 from qa_agentos.models.domain import (
     AgentDefinition,
@@ -33,6 +35,8 @@ from qa_agentos.runtime.gateway.resolution import ModelResolver, ResolvedModel
 from qa_agentos.runtime.graph.builder import build_generic_react_graph
 from qa_agentos.runtime.graph.state import AgentState
 from qa_agentos.runtime.tools.dispatcher import ToolDispatcher
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -61,11 +65,13 @@ class RunExecutor:
         *,
         model_resolver: Optional[ModelResolver] = None,
         checkpointer: Optional[BaseCheckpointSaver[Any]] = None,
+        assigned_attempt: int = 1,
     ) -> None:
         self.session = session
         self.litellm_client = litellm_client
         self.model_resolver = model_resolver
         self.checkpointer = checkpointer
+        self.assigned_attempt = assigned_attempt
 
     async def execute_run(
         self,
@@ -101,9 +107,10 @@ class RunExecutor:
             return RunExecutionResult(run_id=run.id, status=run.status)
 
         is_resuming = run.status == "running"
-        if run.status == "queued":
-            await state_mgr.transition_to("preparing")
-            await self.session.commit()
+        if run.status in ("queued", "preparing"):
+            if run.status == "queued":
+                await state_mgr.transition_to("preparing")
+                await self.session.commit()
 
             # Validate input payload against agent_version.input_schema
             validator = jsonschema.Draft202012Validator(agent_version.input_schema)
@@ -193,7 +200,7 @@ class RunExecutor:
                 else:
                     raise ValueError(f"Run {run.id} has no resolved model")
 
-        # 5. Wire step persistence hook
+        # 5. Wire step persistence hook (idempotent upsert with attempt fence check)
         async def _on_step_completed(
             step_type: str,
             node: str,
@@ -204,38 +211,81 @@ class RunExecutor:
             tokens_output: int,
             gateway_model_key: str,
         ) -> None:
-            # Upsert RunStep
-            step = RunStep(
-                id=uuid.uuid4(),
-                run_id=run.id,
-                step_number=step_number,
-                step_type=step_type,
-                node=node,
-                attempt=1,
-                input_data=input_data,
-                output_data=output_data,
-                status="completed",
-                tokens_input=tokens_input,
-                tokens_output=tokens_output,
-                finished_at=utc_now(),
-            )
-            self.session.add(step)
+            # Atomic attempt fence check under row lock
+            stmt_run = select(Run.attempt, Run.status).where(Run.id == run.id)
+            if self.session.bind and self.session.bind.dialect.name == "postgresql":
+                stmt_run = stmt_run.with_for_update()
+            res = await self.session.execute(stmt_run)
+            row = res.first()
+            if not row:
+                logger.warning("Run vanished during step persistence; aborting step write", run_id=str(run.id))
+                return
+            current_attempt, current_status = row
+            if current_status in TERMINAL_STATUSES:
+                logger.warning(
+                    "Run already in terminal state; refusing to write step", run_id=str(run.id), status=current_status
+                )
+                return
+            if (current_attempt or 1) > self.assigned_attempt:
+                logger.warning(
+                    "Run attempt superseded by newer attempt; refusing to persist step from stale worker",
+                    run_id=str(run.id),
+                    current_attempt=current_attempt,
+                    assigned_attempt=self.assigned_attempt,
+                )
+                return
+
+            # Upsert RunStep idempotently with actual assigned attempt
+            stmt_step = select(RunStep).where(RunStep.run_id == run.id, RunStep.step_number == step_number)
+            existing_step = (await self.session.execute(stmt_step)).scalar_one_or_none()
+            if existing_step:
+                existing_step.output_data = output_data
+                existing_step.tokens_input = tokens_input
+                existing_step.tokens_output = tokens_output
+                existing_step.status = "completed"
+                existing_step.attempt = self.assigned_attempt
+                existing_step.finished_at = utc_now()
+                step = existing_step
+            else:
+                step = RunStep(
+                    id=uuid.uuid4(),
+                    run_id=run.id,
+                    step_number=step_number,
+                    step_type=step_type,
+                    node=node,
+                    attempt=self.assigned_attempt,
+                    input_data=input_data,
+                    output_data=output_data,
+                    status="completed",
+                    tokens_input=tokens_input,
+                    tokens_output=tokens_output,
+                    finished_at=utc_now(),
+                )
+                self.session.add(step)
             await self.session.flush()
 
-            # Persist ModelCall record
-            model_call = ModelCall(
-                id=uuid.uuid4(),
-                run_id=run.id,
-                step_id=step.id,
-                model_id=resolved_model.model_id if resolved_model else None,
-                capability="planner",
-                gateway_model_key=gateway_model_key,
-                tokens_input=tokens_input,
-                tokens_output=tokens_output,
-                cost_usd=0.0,
-                status="succeeded",
-            )
-            self.session.add(model_call)
+            # Persist ModelCall record idempotently
+            stmt_mc = select(ModelCall).where(ModelCall.run_id == run.id, ModelCall.step_id == step.id)
+            existing_mc = (await self.session.execute(stmt_mc)).scalar_one_or_none()
+            if existing_mc:
+                existing_mc.tokens_input = tokens_input
+                existing_mc.tokens_output = tokens_output
+                existing_mc.gateway_model_key = gateway_model_key
+                existing_mc.status = "succeeded"
+            else:
+                model_call = ModelCall(
+                    id=uuid.uuid4(),
+                    run_id=run.id,
+                    step_id=step.id,
+                    model_id=resolved_model.model_id if resolved_model else None,
+                    capability="planner",
+                    gateway_model_key=gateway_model_key,
+                    tokens_input=tokens_input,
+                    tokens_output=tokens_output,
+                    cost_usd=0.0,
+                    status="succeeded",
+                )
+                self.session.add(model_call)
             await self.session.flush()
 
         # 6. Build and compile graph
@@ -253,14 +303,24 @@ class RunExecutor:
                 "tool_dispatcher": dispatcher,
                 "agent_version_entity": agent_version,
                 "on_step_completed": _on_step_completed,
+                "assigned_attempt": self.assigned_attempt,
             }
         }
 
         runnable_config = RunnableConfig(configurable=config["configurable"])
 
         # 7. Execute graph (pass None when resuming from checkpoint)
+        has_checkpoint = False
+        if is_resuming and self.checkpointer:
+            try:
+                cp = await self.checkpointer.aget(runnable_config)
+                if cp is not None:
+                    has_checkpoint = True
+            except Exception:
+                has_checkpoint = False
+
         graph_input: Optional[AgentState] = None
-        if not is_resuming:
+        if not has_checkpoint:
             graph_input = cast(
                 AgentState,
                 {
@@ -285,7 +345,7 @@ class RunExecutor:
         async for state_snapshot in compiled_graph.astream(graph_input, config=runnable_config, stream_mode="values"):
             final_state = state_snapshot
             await self.session.commit()
-            await self.session.refresh(run, ["status"])
+            await self.session.refresh(run, ["status", "attempt"])
             if run.status in TERMINAL_STATUSES:
                 return RunExecutionResult(
                     run_id=run.id,
@@ -294,6 +354,19 @@ class RunExecutor:
                     tokens_output=final_state.get("tokens_output", 0),
                     model_calls_count=final_state.get("model_calls_count", 0),
                     repair_count=final_state.get("repair_count", 0),
+                )
+            if (run.attempt or 1) > self.assigned_attempt:
+                logger.warning(
+                    "Execution superseded by newer attempt; aborting stale worker",
+                    run_id=str(run.id),
+                    current_attempt=run.attempt,
+                    assigned_attempt=self.assigned_attempt,
+                )
+                return RunExecutionResult(
+                    run_id=run.id,
+                    status="superseded",
+                    error_code="STALE_WORKER_SUPERSEDED",
+                    error_message=f"Superseded by attempt {run.attempt}",
                 )
 
         # 8. Check if graph was interrupted
@@ -312,7 +385,7 @@ class RunExecutor:
                 )
 
         # 9. Handle terminal state
-        await self.session.refresh(run, ["status"])
+        await self.session.refresh(run, ["status", "attempt"])
         if run.status in TERMINAL_STATUSES:
             return RunExecutionResult(
                 run_id=run.id,
@@ -321,6 +394,19 @@ class RunExecutor:
                 tokens_output=final_state.get("tokens_output", 0),
                 model_calls_count=final_state.get("model_calls_count", 0),
                 repair_count=final_state.get("repair_count", 0),
+            )
+        if (run.attempt or 1) > self.assigned_attempt:
+            logger.warning(
+                "Cannot finalize terminal state; superseded by newer attempt",
+                run_id=str(run.id),
+                current_attempt=run.attempt,
+                assigned_attempt=self.assigned_attempt,
+            )
+            return RunExecutionResult(
+                run_id=run.id,
+                status="superseded",
+                error_code="STALE_WORKER_SUPERSEDED",
+                error_message=f"Superseded by attempt {run.attempt}",
             )
         status = final_state.get("status")
         tokens_in = final_state.get("tokens_input", 0)

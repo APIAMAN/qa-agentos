@@ -72,9 +72,7 @@ def test_no_provider_sdk_imports_in_runtime():
                 rel_path = file_path.relative_to(api_src)
                 violations.append(f"{rel_path}:{lineno} imports '{module_name}'")
 
-    assert not violations, (
-        "Forbidden provider SDK imports found in runtime:\n" + "\n".join(violations)
-    )
+    assert not violations, "Forbidden provider SDK imports found in runtime:\n" + "\n".join(violations)
 
 
 def test_gateway_client_uses_httpx_only():
@@ -88,6 +86,4 @@ def test_gateway_client_uses_httpx_only():
 
     assert "httpx" in imported_modules, "LiteLLMClient must import and use httpx"
     for forbidden in FORBIDDEN_ROOT_MODULES:
-        assert forbidden not in imported_modules, (
-            f"client.py must not import {forbidden}"
-        )
+        assert forbidden not in imported_modules, f"client.py must not import {forbidden}"

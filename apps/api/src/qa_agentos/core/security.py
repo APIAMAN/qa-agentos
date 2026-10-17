@@ -75,7 +75,9 @@ def create_access_token(
 def decode_access_token(token: str) -> Dict[str, Any]:
     _, public_key = get_rsa_keys()
     try:
-        payload: Dict[str, Any] = jwt.decode(token, public_key, algorithms=[settings.JWT_ALGORITHM], issuer="qa-agentos")
+        payload: Dict[str, Any] = jwt.decode(
+            token, public_key, algorithms=[settings.JWT_ALGORITHM], issuer="qa-agentos"
+        )
         return payload
     except jwt.PyJWTError as e:
         raise UnauthorizedError(message=f"Invalid or expired JWT token: {str(e)}") from e

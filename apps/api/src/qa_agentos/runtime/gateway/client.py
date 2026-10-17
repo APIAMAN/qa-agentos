@@ -8,6 +8,7 @@ performs no application-level retries.
 Secrets: the master key is held as ``SecretStr``-derived private state, sent only in
 the ``Authorization`` header, and never included in errors, logs, or ``repr``.
 """
+
 import json
 from dataclasses import dataclass
 from types import TracebackType
@@ -253,9 +254,7 @@ class LiteLLMClient:
             )
         except httpx.TimeoutException:
             logger.warning("model_gateway_timeout", **log_ctx)
-            raise ModelGatewayTimeoutError(
-                "Timed out waiting for the model gateway.", details=dict(log_ctx)
-            ) from None
+            raise ModelGatewayTimeoutError("Timed out waiting for the model gateway.", details=dict(log_ctx)) from None
         except httpx.TransportError as exc:
             logger.warning("model_gateway_unreachable", error_type=type(exc).__name__, **log_ctx)
             raise ModelGatewayUnavailableError(

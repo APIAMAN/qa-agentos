@@ -200,9 +200,7 @@ async def test_unknown_version_rejected_without_fallback(pg_session: AsyncSessio
 
 async def test_unsupported_implementation_rejected(pg_session: AsyncSession):
     """4. Unsupported implementation identifier or non-builtin kind is rejected."""
-    project, agent_ver, tool, run = await _seed_test_environment(
-        pg_session, tool_impl="untrusted.arbitrary.module:run"
-    )
+    project, agent_ver, tool, run = await _seed_test_environment(pg_session, tool_impl="untrusted.arbitrary.module:run")
     dispatcher = ToolDispatcher(pg_session)
 
     with pytest.raises(ToolImplementationUnsupportedError) as exc_info:
@@ -213,9 +211,7 @@ async def test_unsupported_implementation_rejected(pg_session: AsyncSession):
 async def test_tool_outside_agent_allowlist_rejected(pg_session: AsyncSession):
     """5. A tool outside the calling agent's allowlist is rejected with TOOL_NOT_ALLOWED."""
     # Test Case Generator has no allowed tools: allowed_tools=[]
-    project, agent_ver, tool, run = await _seed_test_environment(
-        pg_session, agent_allowed_tools=[]
-    )
+    project, agent_ver, tool, run = await _seed_test_environment(pg_session, agent_allowed_tools=[])
     dispatcher = ToolDispatcher(pg_session)
     req = ToolInvocationRequest("util.echo", "1.0.0", {"message": "hello"})
     ctx = ToolExecutionContext(run.id, 1, project.id, agent_ver)
@@ -297,9 +293,7 @@ async def test_invalid_input_fails_before_execution(pg_session: AsyncSession):
         executed = True
         return {"echoed_message": "spy", "timestamp": "now"}
 
-    project, agent_ver, tool, run = await _seed_test_environment(
-        pg_session, tool_impl="custom:spy"
-    )
+    project, agent_ver, tool, run = await _seed_test_environment(pg_session, tool_impl="custom:spy")
     dispatcher = ToolDispatcher(pg_session, custom_implementations={"custom:spy": fake_spy})
     # 'message' is required in ECHO_INPUT_SCHEMA; passing invalid payload
     req = ToolInvocationRequest("util.echo", "1.0.0", {"wrong_field": 42})
@@ -314,13 +308,12 @@ async def test_invalid_input_fails_before_execution(pg_session: AsyncSession):
 
 async def test_invalid_output_produces_tool_output_invalid(pg_session: AsyncSession):
     """10. Invocation returning schema-violating output raises TOOL_OUTPUT_INVALID."""
+
     async def bad_output(input_data: Mapping[str, Any], context: Any) -> dict[str, Any]:
         # Missing required 'timestamp' and 'echoed_message'
         return {"invalid_key": "bad"}
 
-    project, agent_ver, tool, run = await _seed_test_environment(
-        pg_session, tool_impl="custom:bad_output"
-    )
+    project, agent_ver, tool, run = await _seed_test_environment(pg_session, tool_impl="custom:bad_output")
     dispatcher = ToolDispatcher(pg_session, custom_implementations={"custom:bad_output": bad_output})
     req = ToolInvocationRequest("util.echo", "1.0.0", {"message": "hello"})
     ctx = ToolExecutionContext(run.id, 1, project.id, agent_ver)
@@ -333,12 +326,11 @@ async def test_invalid_output_produces_tool_output_invalid(pg_session: AsyncSess
 
 async def test_non_json_serializable_output_fails_safely(pg_session: AsyncSession):
     """11. Non-JSON-serializable output raises typed TOOL_OUTPUT_INVALID safely."""
+
     async def non_serializable(input_data: Mapping[str, Any], context: Any) -> dict[str, Any]:
         return {"echoed_message": "hi", "timestamp": "now", "set_val": {1, 2, 3}}
 
-    project, agent_ver, tool, run = await _seed_test_environment(
-        pg_session, tool_impl="custom:non_serializable"
-    )
+    project, agent_ver, tool, run = await _seed_test_environment(pg_session, tool_impl="custom:non_serializable")
     dispatcher = ToolDispatcher(pg_session, custom_implementations={"custom:non_serializable": non_serializable})
     req = ToolInvocationRequest("util.echo", "1.0.0", {"message": "hello"})
     ctx = ToolExecutionContext(run.id, 1, project.id, agent_ver)
@@ -529,9 +521,7 @@ async def test_successful_and_failed_calls_create_run_steps(pg_session: AsyncSes
     await dispatcher.dispatch(req1, ctx1)
 
     step1 = (
-        await pg_session.execute(
-            select(RunStep).where(RunStep.run_id == run.id, RunStep.step_number == 1)
-        )
+        await pg_session.execute(select(RunStep).where(RunStep.run_id == run.id, RunStep.step_number == 1))
     ).scalar_one()
     assert step1.status == "succeeded"
     assert step1.output_data is not None
@@ -545,9 +535,7 @@ async def test_successful_and_failed_calls_create_run_steps(pg_session: AsyncSes
         await dispatcher.dispatch(req2, ctx2)
 
     step2 = (
-        await pg_session.execute(
-            select(RunStep).where(RunStep.run_id == run.id, RunStep.step_number == 2)
-        )
+        await pg_session.execute(select(RunStep).where(RunStep.run_id == run.id, RunStep.step_number == 2))
     ).scalar_one()
     assert step2.status == "failed"
     assert step2.output_data is None
@@ -567,9 +555,7 @@ async def test_repeating_completed_step_idempotent_no_duplicate(pg_session: Asyn
             "timestamp": "2026-10-11T12:00:00Z",
         }
 
-    project, agent_ver, tool, run = await _seed_test_environment(
-        pg_session, tool_impl="custom:counting_echo"
-    )
+    project, agent_ver, tool, run = await _seed_test_environment(pg_session, tool_impl="custom:counting_echo")
     dispatcher = ToolDispatcher(pg_session, custom_implementations={"custom:counting_echo": counting_echo})
     req = ToolInvocationRequest("util.echo", "1.0.0", {"message": "idempotent test"})
     ctx = ToolExecutionContext(run.id, 1, project.id, agent_ver)
@@ -587,10 +573,10 @@ async def test_repeating_completed_step_idempotent_no_duplicate(pg_session: Asyn
 
     # Verify only 1 row exists in RunStep table
     steps = (
-        await pg_session.execute(
-            select(RunStep).where(RunStep.run_id == run.id, RunStep.step_number == 1)
-        )
-    ).scalars().all()
+        (await pg_session.execute(select(RunStep).where(RunStep.run_id == run.id, RunStep.step_number == 1)))
+        .scalars()
+        .all()
+    )
     assert len(steps) == 1, "Must not create duplicate RunStep rows"
 
 
@@ -629,14 +615,10 @@ async def test_scoping_preserved_across_projects_and_agents(pg_session: AsyncSes
     assert res2.run_id == run2.id
 
     step1 = (
-        await pg_session.execute(
-            select(RunStep).where(RunStep.run_id == run1.id, RunStep.step_number == 1)
-        )
+        await pg_session.execute(select(RunStep).where(RunStep.run_id == run1.id, RunStep.step_number == 1))
     ).scalar_one()
     step2 = (
-        await pg_session.execute(
-            select(RunStep).where(RunStep.run_id == run2.id, RunStep.step_number == 1)
-        )
+        await pg_session.execute(select(RunStep).where(RunStep.run_id == run2.id, RunStep.step_number == 1))
     ).scalar_one()
 
     assert step1.run_id == run1.id

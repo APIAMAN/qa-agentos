@@ -77,4 +77,5 @@ def require_scope(required_scope: str) -> Callable[[Identity], Coroutine[Any, An
                 return identity
             raise ForbiddenError(message=f"API Key lacks required scope: {required_scope}")
         return identity
+
     return scope_checker

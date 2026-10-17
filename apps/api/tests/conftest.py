@@ -64,6 +64,7 @@ async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
 # Dedicated PostgreSQL Integration Test Infrastructure
 # ============================================================================
 
+
 def get_postgres_test_url() -> str:
     """Retrieve and validate the dedicated PostgreSQL test database URL.
 
@@ -128,9 +129,7 @@ async def pg_engine(postgres_test_url: str) -> AsyncGenerator[AsyncEngine, None]
                 database=admin_db,
             )
             try:
-                exists = await conn.fetchval(
-                    "SELECT 1 FROM pg_database WHERE datname = $1", db_name
-                )
+                exists = await conn.fetchval("SELECT 1 FROM pg_database WHERE datname = $1", db_name)
                 if not exists:
                     await conn.execute(f'CREATE DATABASE "{db_name}"')
                 break
@@ -174,6 +173,7 @@ async def pg_session(pg_engine) -> AsyncGenerator[AsyncSession, None]:
 @pytest.fixture
 async def pg_client(pg_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
     """AsyncClient configured with dependency overrides to use the PostgreSQL test session."""
+
     async def _override_get_db():
         yield pg_session
 

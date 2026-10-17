@@ -23,7 +23,9 @@ class User(Base):
     role: Mapped[str] = mapped_column(String(50), default="owner", nullable=False)  # owner, admin, member, viewer
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
 
 
 class Project(Base):
@@ -35,14 +37,18 @@ class Project(Base):
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
 
 
 class APIKey(Base):
     __tablename__ = "api_keys"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     key_prefix: Mapped[str] = mapped_column(String(32), nullable=False)
     hashed_key: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
@@ -62,14 +68,18 @@ class AgentDefinition(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
-    versions: Mapped[List["AgentVersion"]] = relationship("AgentVersion", back_populates="agent", cascade="all, delete-orphan")
+    versions: Mapped[List["AgentVersion"]] = relationship(
+        "AgentVersion", back_populates="agent", cascade="all, delete-orphan"
+    )
 
 
 class AgentVersion(Base):
     __tablename__ = "agent_versions"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("agent_definitions.id", ondelete="CASCADE"), nullable=False, index=True)
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agent_definitions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     version: Mapped[str] = mapped_column(String(50), nullable=False)  # semver, e.g. 1.0.0
     status: Mapped[str] = mapped_column(String(50), default="draft", nullable=False)  # draft, active, deprecated
     prompt_hash: Mapped[str] = mapped_column(String(64), nullable=False)  # SHA-256 hash of exact prompt content
@@ -118,9 +128,7 @@ class ToolDefinition(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
-    __table_args__ = (
-        UniqueConstraint("name", "version", name="uq_tool_definitions_name_version"),
-    )
+    __table_args__ = (UniqueConstraint("name", "version", name="uq_tool_definitions_name_version"),)
 
 
 class ModelCatalog(Base):
@@ -137,22 +145,28 @@ class ModelCatalog(Base):
     max_output_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     cost_input_per_1m: Mapped[Optional[float]] = mapped_column(Numeric(10, 4), nullable=True)
     cost_output_per_1m: Mapped[Optional[float]] = mapped_column(Numeric(10, 4), nullable=True)
-    status: Mapped[str] = mapped_column(String(50), default="available", nullable=False)  # available, degraded, unavailable
+    status: Mapped[str] = mapped_column(
+        String(50), default="available", nullable=False
+    )  # available, degraded, unavailable
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
-    __table_args__ = (
-        UniqueConstraint("provider", "name", name="uq_models_provider_name"),
-    )
+    __table_args__ = (UniqueConstraint("provider", "name", name="uq_models_provider_name"),)
 
 
 class Run(Base):
     __tablename__ = "runs"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
-    agent_version_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("agent_versions.id"), nullable=False, index=True)
-    status: Mapped[str] = mapped_column(String(50), default="queued", nullable=False, index=True)  # queued, running, succeeded, failed...
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    agent_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agent_versions.id"), nullable=False, index=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(50), default="queued", nullable=False, index=True
+    )  # queued, running, succeeded, failed...
     input_payload: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False)
     output_payload: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSONB, nullable=True)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -162,9 +176,15 @@ class Run(Base):
     input_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     resolved_agent: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSONB, nullable=True)
     resolved_models: Mapped[Dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
-    replayed_from: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("runs.id", ondelete="SET NULL"), nullable=True)
-    initiated_by: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
-    api_key_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("api_keys.id", ondelete="SET NULL"), nullable=True)
+    replayed_from: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("runs.id", ondelete="SET NULL"), nullable=True
+    )
+    initiated_by: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    api_key_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("api_keys.id", ondelete="SET NULL"), nullable=True
+    )
     hatchet_run_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     attempt: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     error_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
@@ -178,7 +198,9 @@ class Run(Base):
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
 
     steps: Mapped[List["RunStep"]] = relationship("RunStep", back_populates="run", cascade="all, delete-orphan")
     events: Mapped[List["RunEvent"]] = relationship("RunEvent", back_populates="run", cascade="all, delete-orphan")
@@ -204,7 +226,9 @@ class RunStep(Base):
     __tablename__ = "run_steps"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     step_number: Mapped[int] = mapped_column(Integer, nullable=False)
     step_type: Mapped[str] = mapped_column(String(50), nullable=False)  # planner, tool_call, verification
     node: Mapped[str] = mapped_column(String(100), default="", nullable=False)
@@ -222,16 +246,16 @@ class RunStep(Base):
 
     run: Mapped["Run"] = relationship("Run", back_populates="steps")
 
-    __table_args__ = (
-        UniqueConstraint("run_id", "step_number", name="uq_run_steps_run_id_step_number"),
-    )
+    __table_args__ = (UniqueConstraint("run_id", "step_number", name="uq_run_steps_run_id_step_number"),)
 
 
 class RunEvent(Base):
     __tablename__ = "run_events"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     seq: Mapped[int] = mapped_column(Integer, nullable=False)
     from_status: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     to_status: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -240,18 +264,22 @@ class RunEvent(Base):
 
     run: Mapped["Run"] = relationship("Run", back_populates="events")
 
-    __table_args__ = (
-        UniqueConstraint("run_id", "seq", name="uq_run_events_run_id_seq"),
-    )
+    __table_args__ = (UniqueConstraint("run_id", "seq", name="uq_run_events_run_id_seq"),)
 
 
 class ModelCall(Base):
     __tablename__ = "model_calls"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    run_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("runs.id", ondelete="CASCADE"), nullable=True, index=True)
-    step_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("run_steps.id", ondelete="SET NULL"), nullable=True, index=True)
-    model_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("models.id", ondelete="SET NULL"), nullable=True, index=True)
+    run_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("runs.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    step_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("run_steps.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    model_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("models.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     capability: Mapped[str] = mapped_column(String(100), nullable=False)
     gateway_model_key: Mapped[str] = mapped_column(String(255), nullable=False)
     tokens_input: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -268,7 +296,9 @@ class Approval(Base):
     __tablename__ = "approvals"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     action_type: Mapped[str] = mapped_column(String(100), nullable=False)
     prompt_text: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(50), default="pending", nullable=False)  # pending, approved, rejected
@@ -282,8 +312,12 @@ class Artifact(Base):
     __tablename__ = "artifacts"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
-    run_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("runs.id", ondelete="SET NULL"), nullable=True, index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    run_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     artifact_type: Mapped[str] = mapped_column(String(100), nullable=False)  # screenshot, video, trace, log, report
     minio_key: Mapped[str] = mapped_column(String(512), nullable=False)

@@ -5,6 +5,7 @@ Revises: 0001_initial_schema
 Create Date: 2026-10-11
 
 """
+
 from typing import Sequence, Union
 
 import sqlalchemy as sa
@@ -46,15 +47,38 @@ def upgrade() -> None:
     # -------------------------------------------------------------------------
     op.add_column("agent_versions", sa.Column("status", sa.String(50), nullable=False, server_default="draft"))
     op.add_column("agent_versions", sa.Column("prompt_hash", sa.String(64), nullable=True))
-    op.add_column("agent_versions", sa.Column("parameters", postgresql.JSONB(astext_type=sa.Text()), nullable=False, server_default=sa.text("'{}'::jsonb")))
-    op.add_column("agent_versions", sa.Column("permissions", postgresql.JSONB(astext_type=sa.Text()), nullable=False, server_default=sa.text("'[]'::jsonb")))
-    op.add_column("agent_versions", sa.Column("model_requirements", postgresql.JSONB(astext_type=sa.Text()), nullable=False, server_default=sa.text("'{}'::jsonb")))
+    op.add_column(
+        "agent_versions",
+        sa.Column(
+            "parameters", postgresql.JSONB(astext_type=sa.Text()), nullable=False, server_default=sa.text("'{}'::jsonb")
+        ),
+    )
+    op.add_column(
+        "agent_versions",
+        sa.Column(
+            "permissions",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=False,
+            server_default=sa.text("'[]'::jsonb"),
+        ),
+    )
+    op.add_column(
+        "agent_versions",
+        sa.Column(
+            "model_requirements",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=False,
+            server_default=sa.text("'{}'::jsonb"),
+        ),
+    )
     op.add_column("agent_versions", sa.Column("activated_at", sa.DateTime(timezone=True), nullable=True))
 
     # Backfill status from is_published
     op.execute("UPDATE agent_versions SET status = CASE WHEN is_published THEN 'active' ELSE 'draft' END")
     # Backfill prompt_hash using sha256 of existing prompt_template
-    op.execute("UPDATE agent_versions SET prompt_hash = encode(sha256(prompt_template::bytea), 'hex') WHERE prompt_hash IS NULL")
+    op.execute(
+        "UPDATE agent_versions SET prompt_hash = encode(sha256(prompt_template::bytea), 'hex') WHERE prompt_hash IS NULL"
+    )
     op.alter_column("agent_versions", "prompt_hash", nullable=False)
     # Set activated_at for active versions
     op.execute("UPDATE agent_versions SET activated_at = created_at WHERE status = 'active'")
@@ -84,10 +108,28 @@ def upgrade() -> None:
     # Add new metadata columns
     op.add_column("tool_definitions", sa.Column("kind", sa.String(50), nullable=False, server_default="builtin"))
     op.add_column("tool_definitions", sa.Column("implementation", sa.String(255), nullable=False, server_default=""))
-    op.add_column("tool_definitions", sa.Column("permissions", postgresql.JSONB(astext_type=sa.Text()), nullable=False, server_default=sa.text("'[]'::jsonb")))
+    op.add_column(
+        "tool_definitions",
+        sa.Column(
+            "permissions",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=False,
+            server_default=sa.text("'[]'::jsonb"),
+        ),
+    )
     op.add_column("tool_definitions", sa.Column("timeout_ms", sa.Integer(), nullable=False, server_default="30000"))
-    op.add_column("tool_definitions", sa.Column("retry_policy", postgresql.JSONB(astext_type=sa.Text()), nullable=False, server_default=sa.text('\'{"max_attempts": 2, "backoff": "exponential"}\'::jsonb')))
-    op.add_column("tool_definitions", sa.Column("idempotent", sa.Boolean(), nullable=False, server_default=sa.text("true")))
+    op.add_column(
+        "tool_definitions",
+        sa.Column(
+            "retry_policy",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=False,
+            server_default=sa.text('\'{"max_attempts": 2, "backoff": "exponential"}\'::jsonb'),
+        ),
+    )
+    op.add_column(
+        "tool_definitions", sa.Column("idempotent", sa.Boolean(), nullable=False, server_default=sa.text("true"))
+    )
 
     # Add UNIQUE(name, version)
     op.create_unique_constraint("uq_tool_definitions_name_version", "tool_definitions", ["name", "version"])
@@ -103,7 +145,9 @@ def upgrade() -> None:
     op.add_column("models", sa.Column("gateway_model_key", sa.String(255), nullable=True))
     op.add_column("models", sa.Column("capabilities", postgresql.JSONB(astext_type=sa.Text()), nullable=True))
     op.add_column("models", sa.Column("priority", sa.Integer(), nullable=False, server_default="0"))
-    op.add_column("models", sa.Column("structured_output", sa.Boolean(), nullable=False, server_default=sa.text("false")))
+    op.add_column(
+        "models", sa.Column("structured_output", sa.Boolean(), nullable=False, server_default=sa.text("false"))
+    )
     op.add_column("models", sa.Column("context_window", sa.Integer(), nullable=False, server_default="128000"))
     op.add_column("models", sa.Column("max_output_tokens", sa.Integer(), nullable=True))
     op.add_column("models", sa.Column("cost_input_per_1m", sa.Numeric(10, 4), nullable=True))
@@ -130,10 +174,36 @@ def upgrade() -> None:
     op.add_column("runs", sa.Column("idempotency_key", sa.String(255), nullable=True))
     op.add_column("runs", sa.Column("input_hash", sa.String(64), nullable=True))
     op.add_column("runs", sa.Column("resolved_agent", postgresql.JSONB(astext_type=sa.Text()), nullable=True))
-    op.add_column("runs", sa.Column("resolved_models", postgresql.JSONB(astext_type=sa.Text()), nullable=False, server_default=sa.text("'{}'::jsonb")))
-    op.add_column("runs", sa.Column("replayed_from", postgresql.UUID(as_uuid=True), sa.ForeignKey("runs.id", ondelete="SET NULL"), nullable=True))
-    op.add_column("runs", sa.Column("initiated_by", postgresql.UUID(as_uuid=True), sa.ForeignKey("users.id", ondelete="SET NULL"), nullable=True))
-    op.add_column("runs", sa.Column("api_key_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("api_keys.id", ondelete="SET NULL"), nullable=True))
+    op.add_column(
+        "runs",
+        sa.Column(
+            "resolved_models",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=False,
+            server_default=sa.text("'{}'::jsonb"),
+        ),
+    )
+    op.add_column(
+        "runs",
+        sa.Column(
+            "replayed_from", postgresql.UUID(as_uuid=True), sa.ForeignKey("runs.id", ondelete="SET NULL"), nullable=True
+        ),
+    )
+    op.add_column(
+        "runs",
+        sa.Column(
+            "initiated_by", postgresql.UUID(as_uuid=True), sa.ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+        ),
+    )
+    op.add_column(
+        "runs",
+        sa.Column(
+            "api_key_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("api_keys.id", ondelete="SET NULL"),
+            nullable=True,
+        ),
+    )
     op.add_column("runs", sa.Column("hatchet_run_id", sa.String(255), nullable=True))
     op.add_column("runs", sa.Column("attempt", sa.Integer(), nullable=False, server_default="1"))
     op.add_column("runs", sa.Column("error_code", sa.String(100), nullable=True))
@@ -182,11 +252,15 @@ def upgrade() -> None:
     op.create_table(
         "run_events",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column("run_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("runs.id", ondelete="CASCADE"), nullable=False),
+        sa.Column(
+            "run_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("runs.id", ondelete="CASCADE"), nullable=False
+        ),
         sa.Column("seq", sa.Integer(), nullable=False),
         sa.Column("from_status", sa.String(50), nullable=True),
         sa.Column("to_status", sa.String(50), nullable=False),
-        sa.Column("payload", postgresql.JSONB(astext_type=sa.Text()), nullable=False, server_default=sa.text("'{}'::jsonb")),
+        sa.Column(
+            "payload", postgresql.JSONB(astext_type=sa.Text()), nullable=False, server_default=sa.text("'{}'::jsonb")
+        ),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.UniqueConstraint("run_id", "seq", name="uq_run_events_run_id_seq"),
     )
@@ -199,8 +273,12 @@ def upgrade() -> None:
         "model_calls",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("run_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("runs.id", ondelete="CASCADE"), nullable=True),
-        sa.Column("step_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("run_steps.id", ondelete="SET NULL"), nullable=True),
-        sa.Column("model_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("models.id", ondelete="SET NULL"), nullable=True),
+        sa.Column(
+            "step_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("run_steps.id", ondelete="SET NULL"), nullable=True
+        ),
+        sa.Column(
+            "model_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("models.id", ondelete="SET NULL"), nullable=True
+        ),
         sa.Column("capability", sa.String(100), nullable=False),
         sa.Column("gateway_model_key", sa.String(255), nullable=False),
         sa.Column("tokens_input", sa.Integer(), nullable=False, server_default="0"),
@@ -288,7 +366,9 @@ def downgrade() -> None:
     # 2. Revert agent_versions
     op.drop_index("uq_agent_versions_active_per_agent", table_name="agent_versions")
     op.drop_constraint("uq_agent_versions_agent_id_version", "agent_versions", type_="unique")
-    op.add_column("agent_versions", sa.Column("is_published", sa.Boolean(), nullable=False, server_default=sa.text("false")))
+    op.add_column(
+        "agent_versions", sa.Column("is_published", sa.Boolean(), nullable=False, server_default=sa.text("false"))
+    )
     op.execute("UPDATE agent_versions SET is_published = (status = 'active')")
     op.drop_column("agent_versions", "activated_at")
     op.drop_column("agent_versions", "model_requirements")

@@ -42,7 +42,9 @@ def _make_model(
 def test_select_lowest_numerical_priority():
     """Rule 1: Chooses the eligible model with the lowest numerical priority."""
     policy = ProviderPolicy(allowed_providers=frozenset({"nvidia_nim", "gemini"}), environment="test")
-    req = CapabilityRequirement(capability="planner", required_capabilities=("reasoning", "json"), structured_output=True)
+    req = CapabilityRequirement(
+        capability="planner", required_capabilities=("reasoning", "json"), structured_output=True
+    )
 
     m_low = _make_model("model-a", "nvidia_nim", "planner-a", priority=10)
     m_high = _make_model("model-b", "gemini", "planner-b", priority=0)

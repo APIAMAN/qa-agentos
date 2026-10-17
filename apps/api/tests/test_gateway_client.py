@@ -152,6 +152,7 @@ async def test_structured_output_request_construction():
 
 async def test_http_429_rate_limited_mapping():
     """4. HTTP 429 maps to ModelRateLimitedError."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(429, json={"error": {"code": "rate_limit_exceeded"}})
 
@@ -172,6 +173,7 @@ async def test_http_429_rate_limited_mapping():
 
 async def test_http_5xx_upstream_error_mapping():
     """5. HTTP 5xx maps to ModelUpstreamError."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(502, json={"error": {"code": "bad_gateway"}})
 
@@ -192,6 +194,7 @@ async def test_http_5xx_upstream_error_mapping():
 
 async def test_timeout_and_connection_failure_mapping():
     """6. Timeout maps to ModelGatewayTimeoutError; transport error maps to ModelGatewayUnavailableError."""
+
     # Timeout
     def timeout_handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("Read timed out")
@@ -229,6 +232,7 @@ async def test_timeout_and_connection_failure_mapping():
 
 async def test_invalid_json_response():
     """7. Invalid JSON response maps to ModelResponseInvalidError."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"<html>502 Bad Gateway</html>")
 
@@ -247,6 +251,7 @@ async def test_invalid_json_response():
 
 async def test_missing_or_malformed_choices():
     """8. Missing or empty choices list maps to ModelResponseInvalidError."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"choices": []})
 
@@ -265,6 +270,7 @@ async def test_missing_or_malformed_choices():
 
 async def test_token_usage_parsing_when_present_and_safe_when_omitted():
     """9. Token usage parsed when present; gracefully returns None when omitted."""
+
     # When omitted
     def handler_no_usage(request: httpx.Request) -> httpx.Response:
         return httpx.Response(

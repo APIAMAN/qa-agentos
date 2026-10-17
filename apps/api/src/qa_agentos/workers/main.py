@@ -176,12 +176,14 @@ async def execute_agent_run(
                 status=result.status,
                 tokens_input=result.tokens_input,
                 tokens_output=result.tokens_output,
+                cost_usd=result.cost_usd,
             )
             return {
                 "run_id": str(run_id),
                 "status": result.status,
                 "tokens_input": result.tokens_input,
                 "tokens_output": result.tokens_output,
+                "cost_usd": result.cost_usd,
             }
         except (ValueError, KeyError, jsonschema.ValidationError) as perm_exc:
             logger.error("Permanent error encountered during run execution", run_id=str(run_id), error=str(perm_exc))

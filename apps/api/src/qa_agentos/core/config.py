@@ -55,6 +55,20 @@ class Settings(BaseSettings):
     HATCHET_SWEEPER_INTERVAL_SECONDS: int = 60
     HATCHET_SWEEPER_THRESHOLD_SECONDS: int = 30
 
+    # Langfuse Observability
+    LANGFUSE_PUBLIC_KEY: Optional[str] = None
+    LANGFUSE_SECRET_KEY: Optional[SecretStr] = None
+    LANGFUSE_HOST: str = "https://cloud.langfuse.com"
+
+    @property
+    def langfuse_enabled(self) -> bool:
+        return bool(
+            self.LANGFUSE_PUBLIC_KEY
+            and self.LANGFUSE_PUBLIC_KEY.strip()
+            and self.LANGFUSE_SECRET_KEY
+            and self.LANGFUSE_SECRET_KEY.get_secret_value().strip()
+        )
+
     @property
     def model_provider_allowlist(self) -> FrozenSet[str]:
         return frozenset(p.strip() for p in self.MODEL_PROVIDER_ALLOWLIST.split(",") if p.strip())

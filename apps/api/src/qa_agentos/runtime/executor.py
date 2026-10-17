@@ -6,6 +6,7 @@ and PostgreSQL checkpointer without requiring Hatchet or HTTP background queues.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Sequence, cast
@@ -13,10 +14,11 @@ from typing import Any, Dict, Optional, Sequence, cast
 import jsonschema
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from structlog import get_logger
 
+from qa_agentos.core.tracing import Tracer, get_tracer
 from qa_agentos.models.domain import (
     AgentDefinition,
     AgentVersion,
@@ -50,6 +52,7 @@ class RunExecutionResult:
     error_message: Optional[str] = None
     tokens_input: int = 0
     tokens_output: int = 0
+    cost_usd: float = 0.0
     model_calls_count: int = 0
     repair_count: int = 0
     interrupted: bool = False
@@ -66,12 +69,14 @@ class RunExecutor:
         model_resolver: Optional[ModelResolver] = None,
         checkpointer: Optional[BaseCheckpointSaver[Any]] = None,
         assigned_attempt: int = 1,
+        tracer: Optional[Tracer] = None,
     ) -> None:
         self.session = session
         self.litellm_client = litellm_client
         self.model_resolver = model_resolver
         self.checkpointer = checkpointer
         self.assigned_attempt = assigned_attempt
+        self.tracer = tracer or get_tracer()
 
     async def execute_run(
         self,
@@ -90,6 +95,17 @@ class RunExecutor:
 
         # 2. Check for terminal status
         state_mgr = RunStateManager(self.session, run)
+
+        # Ensure Langfuse trace ID is generated and persisted on run only when enabled
+        if not run.langfuse_trace_id:
+            if getattr(self.tracer, "is_enabled", False):
+                try:
+                    run.langfuse_trace_id = self.tracer.create_trace_id()
+                except Exception as exc:
+                    logger.warning("Failed to generate trace ID from tracer", error=str(exc))
+                    run.langfuse_trace_id = None
+            else:
+                run.langfuse_trace_id = None
         if run.status in ("succeeded", "failed", "cancelled"):
             raise RunTerminalStateError(f"Run {run.id} is already in terminal state '{run.status}'.")
 
@@ -137,6 +153,8 @@ class RunExecutor:
                 # Pre-resolved snapshot
                 rm_dict = run.resolved_models["planner"]
                 model_id_val = rm_dict.get("model_id") or rm_dict.get("catalog_id")
+                cost_in = rm_dict.get("cost_input_per_1m")
+                cost_out = rm_dict.get("cost_output_per_1m")
                 resolved_model = ResolvedModel(
                     capability=rm_dict.get("capability", "planner"),
                     model_id=uuid.UUID(str(model_id_val)) if model_id_val else uuid.uuid4(),
@@ -148,6 +166,8 @@ class RunExecutor:
                     context_window=rm_dict.get("context_window", 128000),
                     max_output_tokens=rm_dict.get("max_output_tokens"),
                     priority=rm_dict.get("priority", 1),
+                    cost_input_per_1m=float(cost_in) if cost_in is not None else None,
+                    cost_output_per_1m=float(cost_out) if cost_out is not None else None,
                 )
             elif self.model_resolver:
                 reqs = agent_version.model_requirements or {}
@@ -181,6 +201,8 @@ class RunExecutor:
             if run.resolved_models and "planner" in run.resolved_models:
                 rm_dict = run.resolved_models["planner"]
                 model_id_val = rm_dict.get("model_id") or rm_dict.get("catalog_id")
+                cost_in = rm_dict.get("cost_input_per_1m")
+                cost_out = rm_dict.get("cost_output_per_1m")
                 resolved_model = ResolvedModel(
                     capability=rm_dict.get("capability", "planner"),
                     model_id=uuid.UUID(str(model_id_val)) if model_id_val else uuid.uuid4(),
@@ -192,6 +214,8 @@ class RunExecutor:
                     context_window=rm_dict.get("context_window", 128000),
                     max_output_tokens=rm_dict.get("max_output_tokens"),
                     priority=rm_dict.get("priority", 1),
+                    cost_input_per_1m=float(cost_in) if cost_in is not None else None,
+                    cost_output_per_1m=float(cost_out) if cost_out is not None else None,
                 )
             else:
                 reqs = agent_version.model_requirements or {}
@@ -207,9 +231,12 @@ class RunExecutor:
             step_number: int,
             input_data: Dict[str, Any],
             output_data: Dict[str, Any],
-            tokens_input: int,
-            tokens_output: int,
-            gateway_model_key: str,
+            tokens_input: Optional[int] = None,
+            tokens_output: Optional[int] = None,
+            gateway_model_key: str = "",
+            cost_usd: float = 0.0,
+            langfuse_generation_id: Optional[str] = None,
+            langfuse_observation_id: Optional[str] = None,
         ) -> None:
             # Atomic attempt fence check under row lock
             stmt_run = select(Run.attempt, Run.status).where(Run.id == run.id)
@@ -240,11 +267,13 @@ class RunExecutor:
             existing_step = (await self.session.execute(stmt_step)).scalar_one_or_none()
             if existing_step:
                 existing_step.output_data = output_data
-                existing_step.tokens_input = tokens_input
-                existing_step.tokens_output = tokens_output
+                existing_step.tokens_input = cast(Any, tokens_input)
+                existing_step.tokens_output = cast(Any, tokens_output)
                 existing_step.status = "completed"
                 existing_step.attempt = self.assigned_attempt
                 existing_step.finished_at = utc_now()
+                if langfuse_observation_id:
+                    existing_step.langfuse_observation_id = langfuse_observation_id
                 step = existing_step
             else:
                 step = RunStep(
@@ -257,8 +286,9 @@ class RunExecutor:
                     input_data=input_data,
                     output_data=output_data,
                     status="completed",
-                    tokens_input=tokens_input,
-                    tokens_output=tokens_output,
+                    tokens_input=cast(Any, tokens_input),
+                    tokens_output=cast(Any, tokens_output),
+                    langfuse_observation_id=langfuse_observation_id,
                     finished_at=utc_now(),
                 )
                 self.session.add(step)
@@ -268,10 +298,13 @@ class RunExecutor:
             stmt_mc = select(ModelCall).where(ModelCall.run_id == run.id, ModelCall.step_id == step.id)
             existing_mc = (await self.session.execute(stmt_mc)).scalar_one_or_none()
             if existing_mc:
-                existing_mc.tokens_input = tokens_input
-                existing_mc.tokens_output = tokens_output
+                existing_mc.tokens_input = cast(Any, tokens_input)
+                existing_mc.tokens_output = cast(Any, tokens_output)
                 existing_mc.gateway_model_key = gateway_model_key
+                existing_mc.cost_usd = cost_usd
                 existing_mc.status = "succeeded"
+                if langfuse_generation_id:
+                    existing_mc.langfuse_generation_id = langfuse_generation_id
             else:
                 model_call = ModelCall(
                     id=uuid.uuid4(),
@@ -280,12 +313,25 @@ class RunExecutor:
                     model_id=resolved_model.model_id if resolved_model else None,
                     capability="planner",
                     gateway_model_key=gateway_model_key,
-                    tokens_input=tokens_input,
-                    tokens_output=tokens_output,
-                    cost_usd=0.0,
+                    tokens_input=cast(Any, tokens_input),
+                    tokens_output=cast(Any, tokens_output),
+                    cost_usd=cost_usd,
                     status="succeeded",
+                    langfuse_generation_id=langfuse_generation_id,
                 )
                 self.session.add(model_call)
+            await self.session.flush()
+
+            # Reconcile run totals from all persisted model calls for this run
+            totals_stmt = select(
+                func.coalesce(func.sum(ModelCall.tokens_input), 0),
+                func.coalesce(func.sum(ModelCall.tokens_output), 0),
+                func.coalesce(func.sum(ModelCall.cost_usd), 0.0),
+            ).where(ModelCall.run_id == run.id)
+            totals = (await self.session.execute(totals_stmt)).one()
+            run.tokens_input = int(totals[0])
+            run.tokens_output = int(totals[1])
+            run.cost_usd = round(float(totals[2]), 6)
             await self.session.flush()
 
         # 6. Build and compile graph
@@ -304,6 +350,8 @@ class RunExecutor:
                 "agent_version_entity": agent_version,
                 "on_step_completed": _on_step_completed,
                 "assigned_attempt": self.assigned_attempt,
+                "tracer": self.tracer,
+                "trace_id": run.langfuse_trace_id,
             }
         }
 
@@ -342,32 +390,43 @@ class RunExecutor:
             )
 
         final_state: Dict[str, Any] = {}
-        async for state_snapshot in compiled_graph.astream(graph_input, config=runnable_config, stream_mode="values"):
-            final_state = state_snapshot
-            await self.session.commit()
-            await self.session.refresh(run, ["status", "attempt"])
-            if run.status in TERMINAL_STATUSES:
-                return RunExecutionResult(
-                    run_id=run.id,
-                    status=run.status,
-                    tokens_input=final_state.get("tokens_input", 0),
-                    tokens_output=final_state.get("tokens_output", 0),
-                    model_calls_count=final_state.get("model_calls_count", 0),
-                    repair_count=final_state.get("repair_count", 0),
-                )
-            if (run.attempt or 1) > self.assigned_attempt:
-                logger.warning(
-                    "Execution superseded by newer attempt; aborting stale worker",
-                    run_id=str(run.id),
-                    current_attempt=run.attempt,
-                    assigned_attempt=self.assigned_attempt,
-                )
-                return RunExecutionResult(
-                    run_id=run.id,
-                    status="superseded",
-                    error_code="STALE_WORKER_SUPERSEDED",
-                    error_message=f"Superseded by attempt {run.attempt}",
-                )
+        try:
+            async for state_snapshot in compiled_graph.astream(
+                graph_input, config=runnable_config, stream_mode="values"
+            ):
+                final_state = state_snapshot
+                await self.session.commit()
+                await self.session.refresh(run, ["status", "attempt"])
+                if run.status in TERMINAL_STATUSES:
+                    return RunExecutionResult(
+                        run_id=run.id,
+                        status=run.status,
+                        tokens_input=final_state.get("tokens_input", 0),
+                        tokens_output=final_state.get("tokens_output", 0),
+                        model_calls_count=final_state.get("model_calls_count", 0),
+                        repair_count=final_state.get("repair_count", 0),
+                    )
+                if (run.attempt or 1) > self.assigned_attempt:
+                    logger.warning(
+                        "Execution superseded by newer attempt; aborting stale worker",
+                        run_id=str(run.id),
+                        current_attempt=run.attempt,
+                        assigned_attempt=self.assigned_attempt,
+                    )
+                    return RunExecutionResult(
+                        run_id=run.id,
+                        status="superseded",
+                        error_code="STALE_WORKER_SUPERSEDED",
+                        error_message=f"Superseded by attempt {run.attempt}",
+                    )
+        except asyncio.CancelledError:
+            logger.info("Run execution cancelled during graph streaming", run_id=str(run.id))
+            raise
+        finally:
+            try:
+                self.tracer.flush()
+            except Exception:
+                pass
 
         # 8. Check if graph was interrupted
         if interrupt_after:
@@ -408,11 +467,22 @@ class RunExecutor:
                 error_code="STALE_WORKER_SUPERSEDED",
                 error_message=f"Superseded by attempt {run.attempt}",
             )
+        # Reconcile run totals from all persisted model calls for this run
+        totals_stmt = select(
+            func.coalesce(func.sum(ModelCall.tokens_input), 0),
+            func.coalesce(func.sum(ModelCall.tokens_output), 0),
+            func.coalesce(func.sum(ModelCall.cost_usd), 0.0),
+        ).where(ModelCall.run_id == run.id)
+        totals = (await self.session.execute(totals_stmt)).one()
+        run.tokens_input = int(totals[0])
+        run.tokens_output = int(totals[1])
+        run.cost_usd = round(float(totals[2]), 6)
+
+        try:
+            self.tracer.flush()
+        except Exception:
+            pass
         status = final_state.get("status")
-        tokens_in = final_state.get("tokens_input", 0)
-        tokens_out = final_state.get("tokens_output", 0)
-        run.tokens_input = tokens_in
-        run.tokens_output = tokens_out
 
         if status == "succeeded":
             final_out = final_state.get("final_output")
@@ -426,8 +496,9 @@ class RunExecutor:
                 run_id=run.id,
                 status="succeeded",
                 output_payload=final_out,
-                tokens_input=tokens_in,
-                tokens_output=tokens_out,
+                tokens_input=run.tokens_input,
+                tokens_output=run.tokens_output,
+                cost_usd=run.cost_usd,
                 model_calls_count=final_state.get("model_calls_count", 0),
                 repair_count=final_state.get("repair_count", 0),
             )
@@ -449,8 +520,9 @@ class RunExecutor:
                 status="failed",
                 error_code=err_code,
                 error_message=err_msg,
-                tokens_input=tokens_in,
-                tokens_output=tokens_out,
+                tokens_input=run.tokens_input,
+                tokens_output=run.tokens_output,
+                cost_usd=run.cost_usd,
                 model_calls_count=final_state.get("model_calls_count", 0),
                 repair_count=final_state.get("repair_count", 0),
             )

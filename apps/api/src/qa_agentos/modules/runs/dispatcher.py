@@ -14,7 +14,7 @@ from qa_agentos.core.config import Settings
 from qa_agentos.core.config import settings as global_settings
 from qa_agentos.core.database import AsyncSessionLocal
 from qa_agentos.models.domain import Run
-from qa_agentos.runtime.events import TERMINAL_STATUSES, RunStateManager
+from qa_agentos.runtime.events import TERMINAL_STATUSES, RunStateManager, RunTerminalStateError
 from qa_agentos.runtime.executor import RunExecutor
 from qa_agentos.runtime.gateway.client import LiteLLMClient
 from qa_agentos.runtime.gateway.resolution import ModelResolver, ProviderPolicy
@@ -58,10 +58,13 @@ class InlineDispatcher(RunDispatcher):
         litellm_client: LiteLLMClient,
         *,
         model_resolver: Optional[ModelResolver] = None,
+        checkpointer: Optional[Any] = None,
     ) -> None:
         self.session_factory = session_factory
         self.litellm_client = litellm_client
         self.model_resolver = model_resolver
+        from langgraph.checkpoint.memory import MemorySaver
+        self.checkpointer = checkpointer or MemorySaver()
         self._in_flight_tasks: Dict[uuid.UUID, asyncio.Task[Any]] = {}
 
     @classmethod
@@ -118,11 +121,12 @@ class InlineDispatcher(RunDispatcher):
                     session,
                     self.litellm_client,
                     model_resolver=self.model_resolver,
+                    checkpointer=self.checkpointer,
                 )
                 await executor.execute_run(run)
                 await session.commit()
-        except asyncio.CancelledError:
-            logger.info("Run execution worker task cancelled", run_id=str(run_id))
+        except (asyncio.CancelledError, RunTerminalStateError):
+            logger.info("Run execution worker task cancelled or terminated", run_id=str(run_id))
         except Exception as exc:
             logger.exception("Unexpected exception in run execution worker", run_id=str(run_id), error=str(exc))
             try:

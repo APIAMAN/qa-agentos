@@ -239,7 +239,7 @@ class LangfuseTracer:
 
     def create_trace_id(self) -> Optional[str]:
         try:
-            return self._client.create_trace_id()
+            return cast(Optional[str], self._client.create_trace_id())
         except Exception as exc:
             logger.warning("Failed to generate trace ID via Langfuse", error=str(exc))
             return None

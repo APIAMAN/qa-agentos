@@ -66,7 +66,7 @@ class SweeperInput(BaseModel):
     pass
 
 
-@hatchet.task(
+@hatchet.task(  # type: ignore[untyped-decorator]
     name="agent_run",
     input_validator=AgentRunInput,
     execution_timeout=f"{settings.HATCHET_TASK_TIMEOUT_MINUTES}m",
@@ -195,7 +195,7 @@ async def execute_agent_run(
             raise
 
 
-@hatchet.task(
+@hatchet.task(  # type: ignore[untyped-decorator]
     name="outbox_sweeper",
     input_validator=SweeperInput,
     on_crons=[f"*/{max(1, settings.HATCHET_SWEEPER_INTERVAL_SECONDS // 60)} * * * *"],

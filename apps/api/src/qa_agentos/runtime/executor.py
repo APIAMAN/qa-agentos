@@ -109,6 +109,14 @@ class RunExecutor:
         if run.status in ("succeeded", "failed", "cancelled"):
             raise RunTerminalStateError(f"Run {run.id} is already in terminal state '{run.status}'.")
 
+        if run.status == "waiting_for_approval":
+            logger.info("Run is waiting for approval; pausing execution until decided", run_id=str(run.id))
+            return RunExecutionResult(
+                run_id=run.id,
+                status="waiting_for_approval",
+                interrupted=True,
+            )
+
         # 3. Load AgentVersion and AgentDefinition
         agent_version = await self.session.get(AgentVersion, run.agent_version_id)
         if not agent_version:
@@ -334,6 +342,34 @@ class RunExecutor:
             run.cost_usd = round(float(totals[2]), 6)
             await self.session.flush()
 
+            # Publish step.completed event to Redis Pub/Sub
+            try:
+                from qa_agentos.runtime.pubsub import RunEventPayload, publish_run_event
+
+                step_payload = RunEventPayload(
+                    id=str(step.id),
+                    version="1.0",
+                    event="step.completed",
+                    run_id=str(run.id),
+                    project_id=str(run.project_id),
+                    timestamp=step.finished_at.isoformat() if step.finished_at else utc_now().isoformat(),
+                    data={
+                        "step_id": str(step.id),
+                        "step_number": step.step_number,
+                        "step_type": step.step_type,
+                        "node": step.node,
+                        "status": step.status,
+                        "attempt": step.attempt,
+                        "tokens_input": step.tokens_input,
+                        "tokens_output": step.tokens_output,
+                        "input_data": step.input_data,
+                        "output_data": step.output_data,
+                    },
+                )
+                await publish_run_event(step_payload)
+            except Exception:
+                pass
+
         # 6. Build and compile graph
         dispatcher = ToolDispatcher(self.session)
         compiled_graph = build_generic_react_graph(
@@ -406,6 +442,17 @@ class RunExecutor:
                         model_calls_count=final_state.get("model_calls_count", 0),
                         repair_count=final_state.get("repair_count", 0),
                     )
+                if run.status == "waiting_for_approval":
+                    logger.info("Run transitioned to waiting_for_approval; pausing execution", run_id=str(run.id))
+                    return RunExecutionResult(
+                        run_id=run.id,
+                        status="waiting_for_approval",
+                        interrupted=True,
+                        tokens_input=final_state.get("tokens_input", 0),
+                        tokens_output=final_state.get("tokens_output", 0),
+                        model_calls_count=final_state.get("model_calls_count", 0),
+                        repair_count=final_state.get("repair_count", 0),
+                    )
                 if (run.attempt or 1) > self.assigned_attempt:
                     logger.warning(
                         "Execution superseded by newer attempt; aborting stale worker",
@@ -443,8 +490,18 @@ class RunExecutor:
                     interrupted=True,
                 )
 
-        # 9. Handle terminal state
+        # 9. Handle terminal or paused state
         await self.session.refresh(run, ["status", "attempt"])
+        if run.status == "waiting_for_approval":
+            return RunExecutionResult(
+                run_id=run.id,
+                status="waiting_for_approval",
+                interrupted=True,
+                tokens_input=final_state.get("tokens_input", 0),
+                tokens_output=final_state.get("tokens_output", 0),
+                model_calls_count=final_state.get("model_calls_count", 0),
+                repair_count=final_state.get("repair_count", 0),
+            )
         if run.status in TERMINAL_STATUSES:
             return RunExecutionResult(
                 run_id=run.id,
@@ -491,6 +548,32 @@ class RunExecutor:
                 "succeeded",
                 payload={"summary": final_out.get("summary") if final_out else ""},
             )
+            if final_out:
+                try:
+                    import json
+
+                    from qa_agentos.modules.artifacts.service import ArtifactsService
+                    from qa_agentos.modules.auth.schemas import Identity
+                    identity = Identity(
+                        user_id=None,
+                        project_id=run.project_id,
+                        role="system",
+                        scopes=["*"],
+                        is_api_key=False,
+                    )
+                    raw_bytes = json.dumps(final_out, indent=2).encode("utf-8")
+                    await ArtifactsService.create_artifact(
+                        db=self.session,
+                        identity=identity,
+                        project_id=run.project_id,
+                        name=f"testcases-{str(run.id)[:8]}.json",
+                        artifact_type="json",
+                        data=raw_bytes,
+                        run_id=run.id,
+                        content_type="application/json",
+                    )
+                except Exception as art_err:
+                    logger.warning("Failed to auto-generate run artifact", error=str(art_err), run_id=str(run.id))
             await self.session.commit()
             return RunExecutionResult(
                 run_id=run.id,

@@ -12,8 +12,8 @@ class Settings(BaseSettings):
     # Security & Auth
     SECRET_KEY: str = "dev-secret-key-change-this-in-production-min-32-chars-long"
     JWT_ALGORITHM: str = "RS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 # 24 hours
-    
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
+
     RSA_PRIVATE_KEY_PEM: Optional[str] = None
     RSA_PUBLIC_KEY_PEM: Optional[str] = None
 
@@ -44,11 +44,7 @@ class Settings(BaseSettings):
     def model_provider_allowlist(self) -> FrozenSet[str]:
         return frozenset(p.strip() for p in self.MODEL_PROVIDER_ALLOWLIST.split(",") if p.strip())
 
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        extra="ignore"
-    )
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 
 settings = Settings()

@@ -36,7 +36,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.add_exception_handler(APIError, api_error_handler) # type: ignore[arg-type]
+app.add_exception_handler(APIError, api_error_handler)  # type: ignore[arg-type]
 
 # Mount domain routers under /v1
 app.include_router(auth_router, prefix=settings.API_V1_STR)

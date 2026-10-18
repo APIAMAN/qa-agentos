@@ -90,7 +90,10 @@ async def sync_registries(
                 or db_model.context_window != m.context_window
                 or db_model.max_output_tokens != m.max_output_tokens
                 or (db_model.cost_input_per_1m is not None and float(db_model.cost_input_per_1m) != m.cost_input_per_1m)
-                or (db_model.cost_output_per_1m is not None and float(db_model.cost_output_per_1m) != m.cost_output_per_1m)
+                or (
+                    db_model.cost_output_per_1m is not None
+                    and float(db_model.cost_output_per_1m) != m.cost_output_per_1m
+                )
                 or db_model.status != m.status
             )
             if changed:
@@ -152,7 +155,7 @@ async def sync_registries(
                 db_tool.timeout_ms = t.timeout_ms
                 db_tool.retry_policy = t.retry_policy
                 db_tool.idempotent = t.idempotent
-                db_tool.is_active = (t.status == "active")
+                db_tool.is_active = t.status == "active"
                 result.tools_updated += 1
 
     # 3. Sync Agents & Versions
@@ -170,11 +173,7 @@ async def sync_registries(
             await db.flush()
             result.agents_created += 1
         else:
-            if (
-                db_agent.name != a.name
-                or db_agent.description != a.description
-                or db_agent.agent_type != a.kind
-            ):
+            if db_agent.name != a.name or db_agent.description != a.description or db_agent.agent_type != a.kind:
                 db_agent.name = a.name
                 db_agent.description = a.description
                 db_agent.agent_type = a.kind

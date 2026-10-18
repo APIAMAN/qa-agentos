@@ -27,7 +27,9 @@ async def test_auth_flow_and_api_keys(client: AsyncClient, db_session: AsyncSess
     assert bad_login.status_code == 401
 
     # 4. Login with correct password -> receive JWT access_token
-    good_login = await client.post("/v1/auth/token", json={"email": "testuser@qa-agentos.local", "password": "password123"})
+    good_login = await client.post(
+        "/v1/auth/token", json={"email": "testuser@qa-agentos.local", "password": "password123"}
+    )
     assert good_login.status_code == 200
     token_data = good_login.json()
     assert "access_token" in token_data

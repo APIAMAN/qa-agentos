@@ -43,6 +43,7 @@ async def test_alembic_schema_matches_metadata_postgres(pg_engine):
     from alembic.migration import MigrationContext
 
     async with pg_engine.connect() as conn:
+
         def _check_drift(sync_conn):
             opts = {
                 "target_metadata": Base.metadata,
@@ -77,6 +78,7 @@ async def test_drift_detector_catches_schema_drift():
     test_meta.tables["users"].append_column(Column("synthetic_drift_test_col", String(50), nullable=True))
 
     async with engine.connect() as conn:
+
         def _check(sync_conn):
             mc = MigrationContext.configure(sync_conn, opts={"target_metadata": test_meta})
             return compare_metadata(mc, test_meta)

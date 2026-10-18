@@ -1,4 +1,5 @@
 """Worker Process Placeholder for M0 Foundation."""
+
 import asyncio
 
 import structlog

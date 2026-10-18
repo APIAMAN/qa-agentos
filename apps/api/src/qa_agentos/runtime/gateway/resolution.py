@@ -15,6 +15,7 @@ Selection rules (applied in order):
 Nothing here hard-codes a provider or model name: changing ``priority`` or ``status``
 in the registry changes the outcome without any code change.
 """
+
 import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -72,9 +73,7 @@ class CapabilityRequirement:
     min_context_window: Optional[int] = None
 
     @classmethod
-    def from_model_requirements(
-        cls, model_requirements: Mapping[str, Any], capability: str
-    ) -> "CapabilityRequirement":
+    def from_model_requirements(cls, model_requirements: Mapping[str, Any], capability: str) -> "CapabilityRequirement":
         slot = model_requirements.get(capability) if model_requirements else None
         if not isinstance(slot, Mapping):
             raise NoModelForCapabilityError(
@@ -134,9 +133,7 @@ class ResolvedModel:
         }
 
 
-def _rejection_reason(
-    model: ModelCatalog, requirement: CapabilityRequirement, policy: ProviderPolicy
-) -> Optional[str]:
+def _rejection_reason(model: ModelCatalog, requirement: CapabilityRequirement, policy: ProviderPolicy) -> Optional[str]:
     if model.status != AVAILABLE_STATUS or not model.is_active:
         return f"status_{model.status}" if model.status != AVAILABLE_STATUS else "inactive"
     provider_reason = policy.rejection_reason(model.provider)

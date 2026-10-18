@@ -5,6 +5,7 @@ All errors follow the project's ``APIError`` convention (stable ``code``, human
 authorization headers, or raw upstream response bodies (which may echo provider
 credentials).
 """
+
 from typing import Any, Optional
 
 from fastapi import status

@@ -1,3 +1,4 @@
+
 """Tests ensuring architecture import boundaries are preserved.
 
 Runtime and agent modules must never import provider-specific SDKs
@@ -16,6 +17,7 @@ FORBIDDEN_ROOT_MODULES = frozenset(
         "openai",
         "anthropic",
         "google.generativeai",
+        
         "google.genai",
         "google.cloud",
         "boto3",

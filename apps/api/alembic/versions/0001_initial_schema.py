@@ -1,10 +1,11 @@
 """Initial M0 schema creation
 
 Revision ID: 0001_initial_schema
-Revises: 
+Revises:
 Create Date: 2026-10-04
 
 """
+
 from typing import Sequence, Union
 
 import sqlalchemy as sa
@@ -49,7 +50,12 @@ def upgrade() -> None:
     op.create_table(
         "api_keys",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column("project_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("projects.id", ondelete="CASCADE"), nullable=False),
+        sa.Column(
+            "project_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("projects.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
         sa.Column("name", sa.String(255), nullable=False),
         sa.Column("key_prefix", sa.String(32), nullable=False),
         sa.Column("hashed_key", sa.String(255), nullable=False, unique=True),
@@ -77,7 +83,12 @@ def upgrade() -> None:
     op.create_table(
         "agent_versions",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column("agent_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("agent_definitions.id", ondelete="CASCADE"), nullable=False),
+        sa.Column(
+            "agent_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("agent_definitions.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
         sa.Column("version", sa.String(50), nullable=False),
         sa.Column("prompt_template", sa.Text(), nullable=False),
         sa.Column("input_schema", postgresql.JSONB(), nullable=False),
@@ -120,8 +131,15 @@ def upgrade() -> None:
     op.create_table(
         "runs",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column("project_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("projects.id", ondelete="CASCADE"), nullable=False),
-        sa.Column("agent_version_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("agent_versions.id"), nullable=False),
+        sa.Column(
+            "project_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("projects.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
+        sa.Column(
+            "agent_version_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("agent_versions.id"), nullable=False
+        ),
         sa.Column("status", sa.String(50), nullable=False, server_default="queued"),
         sa.Column("input_payload", postgresql.JSONB(), nullable=False),
         sa.Column("output_payload", postgresql.JSONB(), nullable=True),
@@ -137,7 +155,9 @@ def upgrade() -> None:
     op.create_table(
         "run_steps",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column("run_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("runs.id", ondelete="CASCADE"), nullable=False),
+        sa.Column(
+            "run_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("runs.id", ondelete="CASCADE"), nullable=False
+        ),
         sa.Column("step_number", sa.Integer(), nullable=False),
         sa.Column("step_type", sa.String(50), nullable=False),
         sa.Column("input_data", postgresql.JSONB(), nullable=False),
@@ -151,7 +171,9 @@ def upgrade() -> None:
     op.create_table(
         "approvals",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column("run_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("runs.id", ondelete="CASCADE"), nullable=False),
+        sa.Column(
+            "run_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("runs.id", ondelete="CASCADE"), nullable=False
+        ),
         sa.Column("action_type", sa.String(100), nullable=False),
         sa.Column("prompt_text", sa.Text(), nullable=False),
         sa.Column("status", sa.String(50), nullable=False, server_default="pending"),
@@ -166,8 +188,15 @@ def upgrade() -> None:
     op.create_table(
         "artifacts",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column("project_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("projects.id", ondelete="CASCADE"), nullable=False),
-        sa.Column("run_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("runs.id", ondelete="SET NULL"), nullable=True),
+        sa.Column(
+            "project_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("projects.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
+        sa.Column(
+            "run_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("runs.id", ondelete="SET NULL"), nullable=True
+        ),
         sa.Column("name", sa.String(255), nullable=False),
         sa.Column("artifact_type", sa.String(100), nullable=False),
         sa.Column("minio_key", sa.String(512), nullable=False),

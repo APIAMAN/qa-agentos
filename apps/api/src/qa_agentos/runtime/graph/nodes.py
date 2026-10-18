@@ -1,11 +1,13 @@
-"""Graph node implementations for the generic LangGraph agent runtime.
+"""Execution nodes for the Generic ReAct LangGraph agent runtime.
 
-Implements prepare, generate, execute_tools, validate_output, repair, and finalize
-nodes with strict JSON Schema validation, tool dispatching, and self-repair loops.
+All nodes are stateless async functions receiving and returning partial state updates.
+All LLM invocations route strictly through LiteLLMClient.
+Observability spans and generations are created for each step with safe exception isolation.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from typing import Any, Dict, List, Optional
@@ -18,7 +20,7 @@ from qa_agentos.runtime.gateway.client import (
     LiteLLMClient,
     StructuredOutputSpec,
 )
-from qa_agentos.runtime.gateway.resolution import ResolvedModel
+from qa_agentos.runtime.gateway.resolution import ResolvedModel, calculate_model_cost
 from qa_agentos.runtime.graph.state import AgentState
 from qa_agentos.runtime.tools.dispatcher import (
     ToolDispatcher,
@@ -32,37 +34,91 @@ def _format_user_prompt(input_payload: Dict[str, Any]) -> str:
     return f"Input Requirements & Specifications:\n```json\n{json.dumps(input_payload, indent=2)}\n```"
 
 
+def _safe_start_span(tracer: Any, trace_id: Optional[str], name: str, **kwargs: Any) -> Any:
+    if not tracer or not trace_id or not getattr(tracer, "is_enabled", False):
+        return None
+    try:
+        return tracer.start_span(trace_id=trace_id, name=name, **kwargs)
+    except Exception:
+        return None
+
+
+def _safe_start_generation(tracer: Any, trace_id: Optional[str], name: str, **kwargs: Any) -> Any:
+    if not tracer or not trace_id or not getattr(tracer, "is_enabled", False):
+        return None
+    try:
+        return tracer.start_generation(trace_id=trace_id, name=name, **kwargs)
+    except Exception:
+        return None
+
+
+def _safe_end(ctx: Any, **kwargs: Any) -> None:
+    if not ctx:
+        return
+    try:
+        ctx.end(**kwargs)
+    except Exception:
+        pass
+
+
 async def prepare_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Initialize agent messages and execution state."""
+    from qa_agentos.core.config import settings
+
     configurable = config.get("configurable", {})
-    resolved_model = state.get("resolved_model") or configurable.get("resolved_model")
+    tracer = configurable.get("tracer")
+    trace_id = configurable.get("trace_id")
+    span = _safe_start_span(
+        tracer,
+        trace_id,
+        "node:prepare",
+        metadata={
+            "run_id": state.get("run_id"),
+            "agent": state.get("agent_slug"),
+            "agent_version": state.get("agent_version"),
+        },
+        input_data={"messages_count": len(state.get("messages", []))},
+    )
 
-    updates: Dict[str, Any] = {
-        "step_count": state.get("step_count", 0),
-        "repair_count": state.get("repair_count", 0),
-        "max_repairs": state.get("parameters", {}).get("max_repairs", 2),
-        "max_steps": state.get("parameters", {}).get("max_steps", 10),
-        "tokens_input": state.get("tokens_input", 0),
-        "tokens_output": state.get("tokens_output", 0),
-        "model_calls_count": state.get("model_calls_count", 0),
-        "status": "running",
-    }
+    try:
+        assigned_attempt = configurable.get("assigned_attempt", 1)
+        debug_delay = state.get("parameters", {}).get("debug_delay_seconds", 0)
+        if debug_delay and assigned_attempt == 1 and settings.ENVIRONMENT != "production":
+            await asyncio.sleep(float(debug_delay))
 
-    if resolved_model:
-        updates["resolved_model"] = resolved_model
+        resolved_model = state.get("resolved_model") or configurable.get("resolved_model")
 
-    # Initialize messages if not already present
-    if not state.get("messages"):
-        messages: List[Dict[str, str]] = []
-        prompt_template = state.get("prompt_template", "")
-        if prompt_template:
-            messages.append({"role": "system", "content": prompt_template})
+        updates: Dict[str, Any] = {
+            "step_count": state.get("step_count", 0),
+            "repair_count": state.get("repair_count", 0),
+            "max_repairs": state.get("parameters", {}).get("max_repairs", 2),
+            "max_steps": state.get("parameters", {}).get("max_steps", 10),
+            "tokens_input": state.get("tokens_input", 0),
+            "tokens_output": state.get("tokens_output", 0),
+            "model_calls_count": state.get("model_calls_count", 0),
+            "status": "running",
+        }
 
-        input_payload = state.get("input_payload", {})
-        messages.append({"role": "user", "content": _format_user_prompt(input_payload)})
-        updates["messages"] = messages
+        if resolved_model:
+            updates["resolved_model"] = resolved_model
 
-    return updates
+        # Initialize messages if not already present
+        if not state.get("messages"):
+            messages: List[Dict[str, str]] = []
+            prompt_template = state.get("prompt_template", "")
+            if prompt_template:
+                messages.append({"role": "system", "content": prompt_template})
+
+            input_payload = state.get("input_payload", {})
+            messages.append({"role": "user", "content": _format_user_prompt(input_payload)})
+            updates["messages"] = messages
+
+        _safe_end(span, output_data={"step_count": updates["step_count"]})
+        return updates
+    except (Exception, asyncio.CancelledError) as exc:
+        err_msg = "Task was cancelled" if isinstance(exc, asyncio.CancelledError) else str(exc)
+        _safe_end(span, error=err_msg)
+        raise
 
 
 async def generate_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
@@ -86,6 +142,12 @@ async def generate_node(state: AgentState, config: RunnableConfig) -> Dict[str, 
             context_window=resolved_model_dict.get("context_window", 128000),
             max_output_tokens=resolved_model_dict.get("max_output_tokens"),
             priority=resolved_model_dict.get("priority", 1),
+            cost_input_per_1m=float(resolved_model_dict["cost_input_per_1m"])
+            if resolved_model_dict.get("cost_input_per_1m") is not None
+            else None,
+            cost_output_per_1m=float(resolved_model_dict["cost_output_per_1m"])
+            if resolved_model_dict.get("cost_output_per_1m") is not None
+            else None,
         )
     else:
         raise ValueError("No valid resolved_model provided in state or config")
@@ -104,75 +166,140 @@ async def generate_node(state: AgentState, config: RunnableConfig) -> Dict[str, 
             strict=True,
         )
 
-    # Call model gateway
-    result = await client.chat_completion(
-        model=resolved_model,
-        messages=chat_messages,
-        temperature=state.get("parameters", {}).get("temperature", 0.1),
-        structured_output=structured_output,
+    tracer = configurable.get("tracer")
+    trace_id = configurable.get("trace_id")
+    span = _safe_start_span(
+        tracer,
+        trace_id,
+        "node:generate",
+        metadata={
+            "run_id": state.get("run_id"),
+            "agent": state.get("agent_slug"),
+            "agent_version": state.get("agent_version"),
+            "repair_count": state.get("repair_count", 0),
+        },
+        input_data={"messages_count": len(chat_messages)},
+    )
+    gen = _safe_start_generation(
+        tracer,
+        trace_id,
+        f"model:{resolved_model.gateway_model_key}",
+        model=resolved_model.name,
+        parent_id=getattr(span, "id", None),
+        metadata={
+            "run_id": state.get("run_id"),
+            "agent": state.get("agent_slug"),
+            "agent_version": state.get("agent_version"),
+            "attempt": state.get("repair_count", 0) + 1,
+        },
+        input_data={"messages_count": len(chat_messages)},
+        model_parameters={"temperature": state.get("parameters", {}).get("temperature", 0.1)},
     )
 
-    # Track tokens and usage
-    prompt_tokens = result.usage.prompt_tokens if result.usage else 0
-    completion_tokens = result.usage.completion_tokens if result.usage else 0
-    new_tokens_input = state.get("tokens_input", 0) + (prompt_tokens or 0)
-    new_tokens_output = state.get("tokens_output", 0) + (completion_tokens or 0)
-    new_model_calls_count = state.get("model_calls_count", 0) + 1
-    new_step_count = state.get("step_count", 0) + 1
-
-    # Append assistant response to messages
-    updated_messages = list(state.get("messages", []))
-    updated_messages.append({"role": "assistant", "content": result.content})
-
-    # Check for tool call requests or parse output
-    pending_tool_calls: List[Dict[str, Any]] = []
-    parsed_output: Optional[Dict[str, Any]] = None
-
     try:
-        raw_parsed = json.loads(result.content)
-        if isinstance(raw_parsed, dict):
-            # Check if this is a tool invocation request
-            if "tool_calls" in raw_parsed and isinstance(raw_parsed["tool_calls"], list):
-                pending_tool_calls = raw_parsed["tool_calls"]
-            elif "tool" in raw_parsed and "args" in raw_parsed:
-                pending_tool_calls = [
-                    {
-                        "tool": raw_parsed["tool"],
-                        "version": raw_parsed.get("version", "1.0.0"),
-                        "input_data": raw_parsed["args"],
-                    }
-                ]
-            else:
-                parsed_output = raw_parsed
-        else:
-            parsed_output = None
-    except Exception:
-        parsed_output = None
-
-    # Step callback hook for persistence if configured
-    step_hook = configurable.get("on_step_completed")
-    if step_hook and callable(step_hook):
-        await step_hook(
-            step_type="planner",
-            node="generate",
-            step_number=new_step_count,
-            input_data={"messages_count": len(chat_messages)},
-            output_data={"raw_response": result.content},
-            tokens_input=prompt_tokens or 0,
-            tokens_output=completion_tokens or 0,
-            gateway_model_key=resolved_model.gateway_model_key,
+        # Call model gateway
+        result = await client.chat_completion(
+            model=resolved_model,
+            messages=chat_messages,
+            temperature=state.get("parameters", {}).get("temperature", 0.1),
+            structured_output=structured_output,
         )
 
-    return {
-        "raw_response": result.content,
-        "parsed_output": parsed_output,
-        "pending_tool_calls": pending_tool_calls,
-        "messages": updated_messages,
-        "tokens_input": new_tokens_input,
-        "tokens_output": new_tokens_output,
-        "model_calls_count": new_model_calls_count,
-        "step_count": new_step_count,
-    }
+        # Track tokens and usage accurately from provider response; do not fabricate missing tokens
+        usage_obj = result.usage
+        prompt_tokens: Optional[int] = usage_obj.prompt_tokens if usage_obj is not None else None
+        completion_tokens: Optional[int] = usage_obj.completion_tokens if usage_obj is not None else None
+
+        calculated_cost = calculate_model_cost(
+            prompt_tokens,
+            completion_tokens,
+            resolved_model.cost_input_per_1m,
+            resolved_model.cost_output_per_1m,
+        )
+        new_tokens_input = state.get("tokens_input", 0) + (prompt_tokens or 0)
+        new_tokens_output = state.get("tokens_output", 0) + (completion_tokens or 0)
+        new_model_calls_count = state.get("model_calls_count", 0) + 1
+        new_step_count = state.get("step_count", 0) + 1
+
+        usage_details = (
+            {
+                "input": prompt_tokens or 0,
+                "output": completion_tokens or 0,
+                "total": (prompt_tokens or 0) + (completion_tokens or 0),
+            }
+            if (prompt_tokens is not None or completion_tokens is not None)
+            else None
+        )
+
+        _safe_end(
+            gen,
+            output_data=result.content,
+            usage=usage_details,
+            cost={"total": calculated_cost},
+        )
+        _safe_end(span, output_data={"raw_response_len": len(result.content)})
+
+        # Append assistant response to messages
+        updated_messages = list(state.get("messages", []))
+        updated_messages.append({"role": "assistant", "content": result.content})
+
+        # Check for tool call requests or parse output
+        pending_tool_calls: List[Dict[str, Any]] = []
+        parsed_output: Optional[Dict[str, Any]] = None
+
+        try:
+            raw_parsed = json.loads(result.content)
+            if isinstance(raw_parsed, dict):
+                # Check if this is a tool invocation request
+                if "tool_calls" in raw_parsed and isinstance(raw_parsed["tool_calls"], list):
+                    pending_tool_calls = raw_parsed["tool_calls"]
+                elif "tool" in raw_parsed and "args" in raw_parsed:
+                    pending_tool_calls = [
+                        {
+                            "tool": raw_parsed["tool"],
+                            "version": raw_parsed.get("version", "1.0.0"),
+                            "input_data": raw_parsed["args"],
+                        }
+                    ]
+                else:
+                    parsed_output = raw_parsed
+            else:
+                parsed_output = None
+        except Exception:
+            parsed_output = None
+
+        # Step callback hook for persistence if configured
+        step_hook = configurable.get("on_step_completed")
+        if step_hook and callable(step_hook):
+            await step_hook(
+                step_type="planner",
+                node="generate",
+                step_number=new_step_count,
+                input_data={"messages_count": len(chat_messages)},
+                output_data={"raw_response": result.content},
+                tokens_input=prompt_tokens,
+                tokens_output=completion_tokens,
+                gateway_model_key=resolved_model.gateway_model_key,
+                cost_usd=calculated_cost,
+                langfuse_generation_id=getattr(gen, "id", None),
+                langfuse_observation_id=getattr(span, "id", None),
+            )
+
+        return {
+            "raw_response": result.content,
+            "parsed_output": parsed_output,
+            "pending_tool_calls": pending_tool_calls,
+            "messages": updated_messages,
+            "tokens_input": new_tokens_input,
+            "tokens_output": new_tokens_output,
+            "model_calls_count": new_model_calls_count,
+            "step_count": new_step_count,
+        }
+    except (Exception, asyncio.CancelledError) as exc:
+        err_msg = "Task was cancelled" if isinstance(exc, asyncio.CancelledError) else str(exc)
+        _safe_end(gen, error=err_msg)
+        _safe_end(span, error=err_msg)
+        raise
 
 
 def route_after_generate(state: AgentState) -> str:
@@ -185,120 +312,158 @@ def route_after_generate(state: AgentState) -> str:
 async def execute_tools_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Execute requested tool calls via ToolDispatcher."""
     configurable = config.get("configurable", {})
-    dispatcher: Optional[ToolDispatcher] = configurable.get("tool_dispatcher")
-    agent_version_entity = configurable.get("agent_version_entity")
-    if agent_version_entity is None:
-        raise RuntimeError("No AgentVersion entity provided in runtime config")
+    tracer = configurable.get("tracer")
+    trace_id = configurable.get("trace_id")
+    span = _safe_start_span(
+        tracer,
+        trace_id,
+        "node:execute_tools",
+        metadata={"run_id": state.get("run_id")},
+        input_data={"pending_calls": len(state.get("pending_tool_calls", []))},
+    )
 
-    pending_calls = state.get("pending_tool_calls", [])
-    updated_messages = list(state.get("messages", []))
-    new_step_count = state.get("step_count", 0)
+    try:
+        dispatcher: Optional[ToolDispatcher] = configurable.get("tool_dispatcher")
+        agent_version_entity = configurable.get("agent_version_entity")
+        if agent_version_entity is None:
+            raise RuntimeError("No AgentVersion entity provided in runtime config")
 
-    for call in pending_calls:
-        tool_name = call.get("tool") or call.get("name") or ""
-        tool_version = call.get("version", "1.0.0")
-        input_data = call.get("input_data") or call.get("args") or {}
-        new_step_count += 1
+        pending_calls = state.get("pending_tool_calls", [])
+        updated_messages = list(state.get("messages", []))
+        new_step_count = state.get("step_count", 0)
 
-        context = ToolExecutionContext(
-            run_id=uuid.UUID(state["run_id"]) if state.get("run_id") else uuid.uuid4(),
-            step_number=new_step_count,
-            project_id=uuid.UUID(state["project_id"]) if state.get("project_id") else uuid.uuid4(),
-            agent_version=agent_version_entity,
-            granted_permissions=state.get("permissions", []),
-        )
-        request = ToolInvocationRequest(
-            tool_name=tool_name,
-            tool_version=tool_version,
-            input_data=input_data,
-        )
+        for call in pending_calls:
+            tool_name = call.get("tool") or call.get("name") or ""
+            tool_version = call.get("version", "1.0.0")
+            input_data = call.get("input_data") or call.get("args") or {}
+            new_step_count += 1
 
-        try:
-            if dispatcher is None:
-                raise RuntimeError("No ToolDispatcher provided in runtime config")
-            result = await dispatcher.dispatch(request, context)
-            updated_messages.append(
-                {
-                    "role": "user",
-                    "content": f"Tool '{tool_name}' result:\n```json\n{json.dumps(result.output_data, indent=2)}\n```",
-                }
+            context = ToolExecutionContext(
+                run_id=uuid.UUID(state["run_id"]) if state.get("run_id") else uuid.uuid4(),
+                step_number=new_step_count,
+                project_id=uuid.UUID(state["project_id"]) if state.get("project_id") else uuid.uuid4(),
+                agent_version=agent_version_entity,
+                granted_permissions=state.get("permissions", []),
             )
-        except Exception as exc:
-            updated_messages.append(
-                {
-                    "role": "user",
-                    "content": f"Tool '{tool_name}' failed with error: {str(exc)}",
-                }
+            request = ToolInvocationRequest(
+                tool_name=tool_name,
+                tool_version=tool_version,
+                input_data=input_data,
             )
 
-    return {
-        "messages": updated_messages,
-        "pending_tool_calls": [],
-        "step_count": new_step_count,
-    }
+            try:
+                if dispatcher is None:
+                    raise RuntimeError("No ToolDispatcher provided in runtime config")
+                result = await dispatcher.dispatch(request, context)
+                updated_messages.append(
+                    {
+                        "role": "user",
+                        "content": f"Tool '{tool_name}' result:\n```json\n{json.dumps(result.output_data, indent=2)}\n```",
+                    }
+                )
+            except Exception as exc:
+                updated_messages.append(
+                    {
+                        "role": "user",
+                        "content": f"Tool '{tool_name}' failed with error: {str(exc)}",
+                    }
+                )
+
+        _safe_end(span, output_data={"step_count": new_step_count})
+
+        return {
+            "messages": updated_messages,
+            "pending_tool_calls": [],
+            "step_count": new_step_count,
+        }
+    except (Exception, asyncio.CancelledError) as exc:
+        err_msg = "Task was cancelled" if isinstance(exc, asyncio.CancelledError) else str(exc)
+        _safe_end(span, error=err_msg)
+        raise
 
 
 async def validate_output_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Validate generated output against the agent output schema."""
-    output_schema = state.get("output_schema")
-    parsed_output = state.get("parsed_output")
-    repair_count = state.get("repair_count", 0)
-    max_repairs = state.get("max_repairs", 2)
+    configurable = config.get("configurable", {})
+    tracer = configurable.get("tracer")
+    trace_id = configurable.get("trace_id")
+    span = _safe_start_span(
+        tracer,
+        trace_id,
+        "node:validate_output",
+        metadata={"run_id": state.get("run_id"), "repair_count": state.get("repair_count", 0)},
+    )
 
-    errors: List[str] = []
+    try:
+        output_schema = state.get("output_schema")
+        parsed_output = state.get("parsed_output")
+        repair_count = state.get("repair_count", 0)
+        max_repairs = state.get("max_repairs", 2)
 
-    if parsed_output is None:
-        errors.append("Response is not valid JSON or could not be parsed into an object.")
-    elif output_schema:
-        validator = jsonschema.Draft202012Validator(output_schema)
-        schema_errors = list(validator.iter_errors(parsed_output))
-        for err in schema_errors:
-            loc = f"at '{'.'.join(str(p) for p in err.path)}': " if err.path else ""
-            errors.append(f"{loc}{err.message}")
+        errors: List[str] = []
 
-    if not errors:
-        # Schema valid!
-        return {
-            "status": "succeeded",
-            "final_output": parsed_output,
-            "error_code": None,
-            "error_message": None,
-            "error_details": None,
-        }
+        if parsed_output is None:
+            errors.append("Response is not valid JSON or could not be parsed into an object.")
+        elif output_schema:
+            validator = jsonschema.Draft202012Validator(output_schema)
+            schema_errors = list(validator.iter_errors(parsed_output))
+            for err in schema_errors:
+                loc = f"at '{'.'.join(str(p) for p in err.path)}': " if err.path else ""
+                errors.append(f"{loc}{err.message}")
 
-    # Validation errors detected
-    if repair_count < max_repairs:
-        # Initiate repair
-        new_repair_count = repair_count + 1
-        error_bullets = "\n".join(f"- {e}" for e in errors)
-        repair_prompt = (
-            f"Your previous response did not adhere to the required output schema ({len(errors)} error(s)):\n"
-            f"{error_bullets}\n\n"
-            "Please fix all schema violations and produce a strictly schema-compliant JSON response."
+        if not errors:
+            _safe_end(span, output_data={"valid": True})
+            return {
+                "status": "succeeded",
+                "final_output": parsed_output,
+                "error_code": None,
+                "error_message": None,
+                "error_details": None,
+            }
+
+        # Validation errors detected
+        if repair_count < max_repairs:
+            # Initiate repair
+            new_repair_count = repair_count + 1
+            error_bullets = "\n".join(f"- {e}" for e in errors)
+            repair_prompt = (
+                f"Your previous response did not adhere to the required output schema ({len(errors)} error(s)):\n"
+                f"{error_bullets}\n\n"
+                "Please fix all schema violations and produce a strictly schema-compliant JSON response."
+            )
+            updated_messages = list(state.get("messages", []))
+            updated_messages.append({"role": "user", "content": repair_prompt})
+
+            _safe_end(span, output_data={"valid": False, "action": "repair", "errors_count": len(errors)})
+            return {
+                "repair_count": new_repair_count,
+                "messages": updated_messages,
+                "status": "running",
+                "error_code": "OUTPUT_SCHEMA_INVALID",
+                "error_message": f"Schema validation failed on attempt {repair_count + 1}",
+                "error_details": {"validation_errors": errors},
+            }
+
+        # Repair attempts exhausted
+        _safe_end(
+            span,
+            output_data={"valid": False, "action": "failed", "errors_count": len(errors)},
+            error="OUTPUT_SCHEMA_INVALID",
         )
-        updated_messages = list(state.get("messages", []))
-        updated_messages.append({"role": "user", "content": repair_prompt})
-
         return {
-            "repair_count": new_repair_count,
-            "messages": updated_messages,
-            "status": "running",
+            "status": "failed",
             "error_code": "OUTPUT_SCHEMA_INVALID",
-            "error_message": f"Schema validation failed on attempt {repair_count + 1}",
-            "error_details": {"validation_errors": errors},
+            "error_message": f"Output schema validation failed after {repair_count} repair attempts.",
+            "error_details": {
+                "validation_errors": errors,
+                "repair_attempts": repair_count,
+                "raw_response": state.get("raw_response"),
+            },
         }
-
-    # Repair attempts exhausted
-    return {
-        "status": "failed",
-        "error_code": "OUTPUT_SCHEMA_INVALID",
-        "error_message": f"Output schema validation failed after {repair_count} repair attempts.",
-        "error_details": {
-            "validation_errors": errors,
-            "repair_attempts": repair_count,
-            "raw_response": state.get("raw_response"),
-        },
-    }
+    except (Exception, asyncio.CancelledError) as exc:
+        err_msg = "Task was cancelled" if isinstance(exc, asyncio.CancelledError) else str(exc)
+        _safe_end(span, error=err_msg)
+        raise
 
 
 def route_after_validate(state: AgentState) -> str:
@@ -311,9 +476,30 @@ def route_after_validate(state: AgentState) -> str:
 
 async def repair_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Repair transition node routing back to generation."""
-    return {"status": "running"}
+    configurable = config.get("configurable", {})
+    tracer = configurable.get("tracer")
+    trace_id = configurable.get("trace_id")
+    span = _safe_start_span(tracer, trace_id, "node:repair", metadata={"run_id": state.get("run_id")})
+    try:
+        _safe_end(span, output_data={"action": "re-entering generate"})
+        return {"status": "running"}
+    except (Exception, asyncio.CancelledError) as exc:
+        err_msg = "Task was cancelled" if isinstance(exc, asyncio.CancelledError) else str(exc)
+        _safe_end(span, error=err_msg)
+        raise
 
 
 async def finalize_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Terminal state finalizer."""
-    return {}
+    configurable = config.get("configurable", {})
+    tracer = configurable.get("tracer")
+    trace_id = configurable.get("trace_id")
+    span = _safe_start_span(tracer, trace_id, "node:finalize", metadata={"run_id": state.get("run_id")})
+    try:
+        status = state.get("status")
+        _safe_end(span, output_data={"final_status": status})
+        return {}
+    except (Exception, asyncio.CancelledError) as exc:
+        err_msg = "Task was cancelled" if isinstance(exc, asyncio.CancelledError) else str(exc)
+        _safe_end(span, error=err_msg)
+        raise

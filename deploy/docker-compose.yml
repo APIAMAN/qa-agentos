@@ -11,6 +11,7 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init-databases.sh:/docker-entrypoint-initdb.d/init-databases.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-qa_agentos}"]
       interval: 5s
@@ -64,23 +65,50 @@ services:
       exit 0;
       "
 
+  hatchet-setup:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-admin:v0.111.0
+    container_name: qa_agentos_hatchet_setup
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/qa_agentos_hatchet?sslmode=disable
+    volumes:
+      - hatchet_keys:/hatchet/keys
+      - hatchet_config:/hatchet/config
+    entrypoint: >
+      /bin/sh -c "
+      mkdir -p /hatchet/keys /hatchet/config;
+      if [ ! -f /hatchet/keys/private_ec256.key ]; then
+        echo 'Generating Hatchet local keys...';
+        /hatchet/hatchet-admin keyset create-local-keys --key-dir /hatchet/keys;
+      fi;
+      echo 'Running Hatchet quickstart bootstrap...';
+      /hatchet/hatchet-admin quickstart --skip certs --generated-config-dir /hatchet/config --overwrite=false;
+      echo 'Hatchet setup completed successfully';
+      exit 0;
+      "
+
   hatchet:
-    image: ghcr.io/hatchet-dev/hatchet/hatchet-engine:latest
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-engine:v0.111.0
     container_name: qa_agentos_hatchet
     restart: always
     depends_on:
       postgres:
         condition: service_healthy
+      hatchet-setup:
+        condition: service_completed_successfully
     environment:
-      HATCHET_DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-qa_agentos}?sslmode=disable
-      SERVER_POSTGRES_PRIMARY_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-qa_agentos}?sslmode=disable
-      SERVER_DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-qa_agentos}?sslmode=disable
-      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-qa_agentos}?sslmode=disable
+      HATCHET_DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/qa_agentos_hatchet?sslmode=disable
+      SERVER_POSTGRES_PRIMARY_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/qa_agentos_hatchet?sslmode=disable
+      SERVER_DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/qa_agentos_hatchet?sslmode=disable
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/qa_agentos_hatchet?sslmode=disable
       SERVER_POSTGRES_HOST: postgres
       SERVER_POSTGRES_PORT: "5432"
       SERVER_POSTGRES_USERNAME: ${POSTGRES_USER:-postgres}
       SERVER_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      SERVER_POSTGRES_DATABASE: ${POSTGRES_DB:-qa_agentos}
+      SERVER_POSTGRES_DATABASE: qa_agentos_hatchet
       SERVER_AUTH_COOKIE_DOMAIN: localhost
       SERVER_AUTH_COOKIE_SECRETS: "12345678901234567890123456789012 12345678901234567890123456789012"
       SERVER_URL: http://localhost:8080
@@ -89,7 +117,8 @@ services:
       SERVER_ENCRYPTION_JWT_PRIVATE_KEYSET_FILE: /hatchet/keys/private_ec256.key
       SERVER_ENCRYPTION_JWT_PUBLIC_KEYSET_FILE: /hatchet/keys/public_ec256.key
     volumes:
-      - ./hatchet-keys:/hatchet/keys
+      - hatchet_keys:/hatchet/keys
+      - hatchet_config:/hatchet/config
     ports:
       - "7077:7077"
       - "8080:8080"
@@ -123,6 +152,10 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-qa_agentos}
       REDIS_URL: redis://redis:6379/0
       MINIO_ENDPOINT: minio:9000
+      RUN_DISPATCHER: ${RUN_DISPATCHER:-inline}
+      HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN:-}
+      HATCHET_CLIENT_HOST_PORT: hatchet:7077
+      HATCHET_CLIENT_SERVER_URL: http://hatchet:8080
     ports:
       - "8000:8000"
 
@@ -136,9 +169,17 @@ services:
     depends_on:
       api:
         condition: service_started
+      postgres:
+        condition: service_healthy
+      hatchet:
+        condition: service_started
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-qa_agentos}
       REDIS_URL: redis://redis:6379/0
+      RUN_DISPATCHER: ${RUN_DISPATCHER:-inline}
+      HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN:-}
+      HATCHET_CLIENT_HOST_PORT: hatchet:7077
+      HATCHET_CLIENT_SERVER_URL: http://hatchet:8080
 
   frontend:
     build:
@@ -172,3 +213,5 @@ volumes:
   minio_data:
   caddy_data:
   caddy_config:
+  hatchet_keys:
+  hatchet_config:

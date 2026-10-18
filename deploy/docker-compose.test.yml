@@ -1,0 +1,92 @@
+name: qa_p6_test
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: p6test_postgres
+    restart: "no"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: qa_agentos
+    ports:
+      - "5434:5432"
+    volumes:
+      - p6test_postgres_data:/var/lib/postgresql/data
+      - ./postgres/init-databases.sh:/docker-entrypoint-initdb.d/init-databases.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d qa_agentos"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: p6test_redis
+    restart: "no"
+    ports:
+      - "6380:6379"
+    volumes:
+      - p6test_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-v1.52.0
+    container_name: p6test_litellm
+    restart: "no"
+    ports:
+      - "4001:4000"
+    volumes:
+      - ./litellm/config.mock.yaml:/app/config.yaml
+    environment:
+      LITELLM_MASTER_KEY: sk-litellm-dev-master-key
+      NVIDIA_NIM_API_KEY: dev_key
+      GEMINI_API_KEY: dev_key
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health/liveliness"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  hatchet-setup:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-admin:v0.111.0
+    container_name: p6test_hatchet_setup
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/qa_agentos_hatchet?sslmode=disable
+    volumes:
+      - p6test_hatchet_keys:/hatchet/keys
+      - p6test_hatchet_config:/hatchet/config
+      - ./hatchet/setup.sh:/setup.sh:ro
+    entrypoint: ["/bin/sh", "/setup.sh"]
+
+  hatchet:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-engine:v0.111.0
+    container_name: p6test_hatchet
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      hatchet-setup:
+        condition: service_completed_successfully
+    command: ["/hatchet/hatchet-engine", "--config", "/hatchet/config"]
+    volumes:
+      - p6test_hatchet_keys:/hatchet/keys
+      - p6test_hatchet_config:/hatchet/config
+    ports:
+      - "7078:7077"
+      - "8081:8080"
+
+volumes:
+  p6test_postgres_data:
+  p6test_redis_data:
+  p6test_hatchet_keys:
+  p6test_hatchet_config:

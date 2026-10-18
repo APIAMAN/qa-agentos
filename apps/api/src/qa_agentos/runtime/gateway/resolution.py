@@ -112,6 +112,8 @@ class ResolvedModel:
     context_window: int
     max_output_tokens: Optional[int]
     priority: int
+    cost_input_per_1m: Optional[float] = None
+    cost_output_per_1m: Optional[float] = None
 
     @property
     def supports_json_mode(self) -> bool:
@@ -130,7 +132,23 @@ class ResolvedModel:
             "context_window": self.context_window,
             "max_output_tokens": self.max_output_tokens,
             "priority": self.priority,
+            "cost_input_per_1m": self.cost_input_per_1m,
+            "cost_output_per_1m": self.cost_output_per_1m,
         }
+
+
+def calculate_model_cost(
+    tokens_input: Optional[int],
+    tokens_output: Optional[int],
+    cost_input_per_1m: Optional[float],
+    cost_output_per_1m: Optional[float],
+) -> float:
+    """Deterministically calculate cost in USD given tokens and per-1M-token pricing."""
+    if cost_input_per_1m is None and cost_output_per_1m is None:
+        return 0.0
+    in_cost = ((tokens_input or 0) * (cost_input_per_1m or 0.0)) / 1_000_000.0
+    out_cost = ((tokens_output or 0) * (cost_output_per_1m or 0.0)) / 1_000_000.0
+    return round(in_cost + out_cost, 6)
 
 
 def _rejection_reason(model: ModelCatalog, requirement: CapabilityRequirement, policy: ProviderPolicy) -> Optional[str]:
@@ -190,6 +208,8 @@ def select_model(
         context_window=chosen.context_window,
         max_output_tokens=chosen.max_output_tokens,
         priority=chosen.priority,
+        cost_input_per_1m=float(chosen.cost_input_per_1m) if chosen.cost_input_per_1m is not None else None,
+        cost_output_per_1m=float(chosen.cost_output_per_1m) if chosen.cost_output_per_1m is not None else None,
     )
 
 

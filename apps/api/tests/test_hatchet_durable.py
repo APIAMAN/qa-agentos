@@ -22,7 +22,18 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-from hatchet_sdk import NonRetryableException
+import pytest_asyncio
+
+try:
+    from hatchet_sdk import NonRetryableException
+    HAS_HATCHET = True
+except ImportError:
+    class NonRetryableException(Exception):  # type: ignore
+        pass
+    HAS_HATCHET = False
+
+if not HAS_HATCHET:
+    pytestmark = pytest.mark.skip(reason="hatchet_sdk not installed in local environment")
 from qa_agentos.core.config import Settings
 from qa_agentos.models.domain import (
     AgentDefinition,
@@ -41,7 +52,11 @@ from qa_agentos.modules.runs.dispatcher import (
 from qa_agentos.modules.runs.sweeper import sweep_outbox
 from qa_agentos.runtime.executor import RunExecutor
 from qa_agentos.runtime.gateway.client import LiteLLMClient
-from qa_agentos.workers.main import AgentRunInput, execute_agent_run
+
+if HAS_HATCHET:
+    from qa_agentos.workers.main import AgentRunInput, execute_agent_run
+else:
+    AgentRunInput, execute_agent_run = None, None  # type: ignore
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -50,7 +65,7 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-@pytest.fixture(autouse=True)
+@pytest_asyncio.fixture(autouse=True)
 async def cleanup_database_after_each_hatchet_test(pg_engine):
     yield
     async with pg_engine.connect() as conn:
@@ -71,7 +86,7 @@ async def cleanup_database_after_each_hatchet_test(pg_engine):
         await trans.commit()
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def seeded_h_db(pg_engine):
     """Seed project, user, agent definition, agent version, and catalog model for Hatchet tests."""
     session_factory = async_sessionmaker(pg_engine, expire_on_commit=False, class_=AsyncSession)

@@ -42,16 +42,26 @@ async def resolve_project_id(
     identity: Identity,
     x_project_id: Optional[uuid.UUID] = None,
 ) -> uuid.UUID:
-    """Determine effective project_id from API key identity, header, or user default."""
+    """Determine effective project_id from API key identity, header, or user default with validation."""
+    from qa_agentos.core.errors import ForbiddenError, NotFoundError
+
     if identity.is_api_key and identity.project_id:
+        if x_project_id and x_project_id != identity.project_id:
+            raise ForbiddenError(message="API key is not authorized for the requested project")
         return identity.project_id
+
     if x_project_id:
+        stmt = select(Project.id).where(Project.id == x_project_id, Project.is_active.is_(True))
+        res = await db.execute(stmt)
+        if not res.scalar_one_or_none():
+            raise NotFoundError(message=f"Project {x_project_id} not found or inactive")
         return x_project_id
+
     if identity.project_id:
         return identity.project_id
 
-    # Fall back to user's first available project
-    stmt = select(Project.id).limit(1)
+    # Fall back to user's first available active project
+    stmt = select(Project.id).where(Project.is_active.is_(True)).order_by(Project.created_at.asc()).limit(1)
     res = await db.execute(stmt)
     proj_id = res.scalar_one_or_none()
     if proj_id:
@@ -233,6 +243,29 @@ class RunsService:
             raise
 
         await db.refresh(new_run)
+
+        # Publish run.queued event to Redis Pub/Sub
+        try:
+            from qa_agentos.runtime.pubsub import RunEventPayload, publish_run_event
+
+            pub_payload = RunEventPayload(
+                id=str(event.id),
+                version="1.0",
+                event="run.queued",
+                run_id=str(new_run.id),
+                project_id=str(new_run.project_id),
+                timestamp=event.created_at.isoformat(),
+                data={
+                    "seq": event.seq,
+                    "status": "queued",
+                    "agent": payload.agent,
+                    "version": version.version,
+                    "queued_at": new_run.queued_at.isoformat() if new_run.queued_at else None,
+                },
+            )
+            await publish_run_event(pub_payload)
+        except Exception:
+            pass
 
         # 8. Dispatch asynchronously AFTER transaction commit
         if dispatcher:

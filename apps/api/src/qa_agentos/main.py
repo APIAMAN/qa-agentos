@@ -7,6 +7,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from qa_agentos.core.config import settings
 from qa_agentos.core.errors import APIError, api_error_handler
 from qa_agentos.core.logging import logger, setup_logging
+from qa_agentos.modules.agents.router import router as agents_router
+from qa_agentos.modules.approvals.router import router as approvals_router
+from qa_agentos.modules.artifacts.router import router as artifacts_router
 from qa_agentos.modules.auth.router import router as auth_router
 from qa_agentos.modules.projects.router import router as projects_router
 from qa_agentos.modules.runs.dispatcher import get_dispatcher, set_dispatcher
@@ -24,6 +27,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield
     logger.info("QA AgentOS Control Plane shutting down")
     await dispatcher.shutdown()
+    try:
+        from qa_agentos.runtime.pubsub import close_redis
+        await close_redis()
+    except Exception:
+        pass
 
 
 app = FastAPI(
@@ -48,7 +56,10 @@ app.add_exception_handler(APIError, api_error_handler)  # type: ignore[arg-type]
 # Mount domain routers under /v1
 app.include_router(auth_router, prefix=settings.API_V1_STR)
 app.include_router(projects_router, prefix=settings.API_V1_STR)
+app.include_router(agents_router, prefix=settings.API_V1_STR)
 app.include_router(runs_router, prefix=settings.API_V1_STR)
+app.include_router(approvals_router, prefix=settings.API_V1_STR + "/approvals", tags=["Approvals"])
+app.include_router(artifacts_router, prefix=settings.API_V1_STR + "/artifacts", tags=["Artifacts"])
 
 
 @app.get("/health", tags=["Health"])

@@ -772,7 +772,9 @@ async def test_cancellation_safe_telemetry_cleanup(db_session: AsyncSession, see
     spy_tracer = SpyTracer()
 
     # Create a mock transport that blocks until cancelled
+    entered_http = asyncio.Event()
     async def blocking_handler(request: httpx.Request) -> httpx.Response:
+        entered_http.set()
         await asyncio.sleep(10.0)
         return httpx.Response(status_code=200, json={})
 
@@ -788,8 +790,11 @@ async def test_cancellation_safe_telemetry_cleanup(db_session: AsyncSession, see
     )
 
     task = asyncio.create_task(executor.execute_run(run))
-    # Give the task a moment to enter generate_node
-    await asyncio.sleep(0.1)
+    # Wait until generate_node actually enters the HTTP call
+    try:
+        await asyncio.wait_for(entered_http.wait(), timeout=3.0)
+    except asyncio.TimeoutError:
+        pass
     task.cancel()
 
     with pytest.raises(asyncio.CancelledError):

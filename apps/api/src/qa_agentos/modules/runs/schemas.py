@@ -63,3 +63,8 @@ class RunStepResponse(BaseModel):
     finished_at: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class StreamTicketResponse(BaseModel):
+    ticket: str
+    expires_in: int = 60

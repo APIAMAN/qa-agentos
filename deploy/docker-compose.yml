@@ -65,6 +65,17 @@ services:
       exit 0;
       "
 
+  # Applies Hatchet's own schema to qa_agentos_hatchet (hatchet-admin does not).
+  hatchet-migrate:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-migrate:v0.111.0
+    container_name: qa_agentos_hatchet_migrate
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/qa_agentos_hatchet?sslmode=disable
+
   hatchet-setup:
     image: ghcr.io/hatchet-dev/hatchet/hatchet-admin:v0.111.0
     container_name: qa_agentos_hatchet_setup
@@ -72,6 +83,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      hatchet-migrate:
+        condition: service_completed_successfully
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/qa_agentos_hatchet?sslmode=disable
     volumes:

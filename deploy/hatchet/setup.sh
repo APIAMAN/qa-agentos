@@ -1,6 +1,12 @@
 #!/bin/sh
 set -e
 
+# Re-running would regenerate certs/token under a running engine and break worker TLS.
+if [ -s /hatchet/config/token.txt ] && [ -f /hatchet/keys/certs/ca.cert ]; then
+  echo 'Hatchet already set up; skipping'
+  exit 0
+fi
+
 rm -rf /hatchet/config/*
 mkdir -p /hatchet/keys/certs /hatchet/config
 

@@ -14,7 +14,14 @@ from qa_agentos.core.errors import APIError
 
 
 class ModelGatewayError(APIError):
-    """Base class for all model resolution / gateway failures."""
+    """Base class for all model resolution / gateway failures.
+
+    ``retryable`` tells durable workers whether re-running the same request can succeed.
+    Permanent errors (bad credentials, rejected request, unsupported model features,
+    no eligible model) are never retried: retrying them only repeats billable calls.
+    """
+
+    retryable: bool = False
 
 
 class NoModelForCapabilityError(ModelGatewayError):
@@ -38,6 +45,8 @@ class ModelStructuredOutputUnsupportedError(ModelGatewayError):
 
 
 class ModelGatewayTimeoutError(ModelGatewayError):
+    retryable = True
+
     def __init__(self, message: str, details: Optional[Any] = None) -> None:
         super().__init__(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
@@ -48,6 +57,8 @@ class ModelGatewayTimeoutError(ModelGatewayError):
 
 
 class ModelGatewayUnavailableError(ModelGatewayError):
+    retryable = True
+
     def __init__(self, message: str, details: Optional[Any] = None) -> None:
         super().__init__(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -58,6 +69,8 @@ class ModelGatewayUnavailableError(ModelGatewayError):
 
 
 class ModelRateLimitedError(ModelGatewayError):
+    retryable = True
+
     def __init__(self, message: str, details: Optional[Any] = None) -> None:
         super().__init__(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -68,6 +81,8 @@ class ModelRateLimitedError(ModelGatewayError):
 
 
 class ModelUpstreamError(ModelGatewayError):
+    retryable = True
+
     def __init__(self, message: str, details: Optional[Any] = None) -> None:
         super().__init__(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -98,6 +113,8 @@ class ModelRequestRejectedError(ModelGatewayError):
 
 
 class ModelResponseInvalidError(ModelGatewayError):
+    retryable = True
+
     def __init__(self, message: str, details: Optional[Any] = None) -> None:
         super().__init__(
             status_code=status.HTTP_502_BAD_GATEWAY,

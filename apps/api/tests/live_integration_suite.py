@@ -254,7 +254,12 @@ async def test_live_sweeper_recovery(seeded: Dict[str, Any], dispatcher: Hatchet
 
 
 async def test_live_duplicate_and_fencing(seeded: Dict[str, Any]) -> None:
-    """3. Verify duplicate delivery drop and stale worker fencing with real PostgreSQL transactions."""
+    """3. Duplicate-delivery drop and stale-worker fencing under the M3 claim protocol.
+
+    ``runs.attempt`` is the database fencing token; ``hatchet_run_id`` + ``hatchet_attempt``
+    record which delivery owns the run. Only a resume intent or a higher Hatchet attempt of the
+    owning workflow may take over; every other delivery is a duplicate.
+    """
     print("--- Test 3: Live Duplicate Delivery & Stale Worker Fencing ---")
     project = seeded["project"]
     agent_ver = seeded["agent_version"]
@@ -267,7 +272,10 @@ async def test_live_duplicate_and_fencing(seeded: Dict[str, Any]) -> None:
             project_id=project.id,
             agent_version_id=agent_ver.id,
             status="running",
-            attempt=2,  # Attempt 2 has already won and claimed/finalized the run
+            attempt=2,  # fencing token: attempt 2 owns the run
+            hatchet_run_id="wf-owner",  # owning Hatchet workflow run
+            hatchet_attempt=2,  # owning delivery's Hatchet attempt
+            heartbeat_at=utc_now(),
             input_payload={"requirements": "Live fencing test"},
             output_payload={"test_cases": [{"id": "WINNER-ATTEMPT-2"}]},
             resolved_models={
@@ -285,41 +293,46 @@ async def test_live_duplicate_and_fencing(seeded: Dict[str, Any]) -> None:
         session.add(run)
         await session.commit()
 
-    # Part A: Test duplicate delivery of attempt 2 is dropped
-    class MockCtx:
-        attempt_number = 2
+    class Ctx:
+        def __init__(self, attempt_number: int, workflow_run_id: str) -> None:
+            self.attempt_number = attempt_number
+            self.workflow_run_id = workflow_run_id
 
-    dup_result = await execute_agent_run({"run_id": str(run_id)}, MockCtx(), session_factory=SessionFactory)
-    print("Duplicate delivery result:", dup_result)
-    assert dup_result["status"] == "running"
-    assert dup_result["message"] == "Duplicate delivery ignored"
+    # Part A: duplicates are dropped and do not change ownership
+    for label, dup_ctx in (
+        ("same delivery redelivered", Ctx(2, "wf-owner")),
+        ("other workflow, attempt 1 (e.g. duplicate enqueue)", Ctx(1, "wf-other")),
+        ("other workflow, higher attempt", Ctx(3, "wf-other")),
+    ):
+        dup_result = await execute_agent_run({"run_id": str(run_id)}, dup_ctx, session_factory=SessionFactory)
+        print(f"Duplicate delivery ({label}):", dup_result)
+        assert dup_result["status"] == "running"
+        assert dup_result["message"] == "Duplicate delivery ignored"
 
-    # Part B: Stale worker (attempt 1) attempts execution and is fenced
+    async with SessionFactory() as session:
+        refreshed = await session.get(Run, run_id)
+        assert refreshed is not None
+        assert (refreshed.attempt, refreshed.hatchet_run_id, refreshed.hatchet_attempt) == (2, "wf-owner", 2)
+
+    # Part B: a stale worker holding fencing token 1 cannot write
     async with SessionFactory() as session:
         stale_run = await session.get(Run, run_id)
         assert stale_run is not None
-
-        # LiteLLM client pointing to live LiteLLM mock
-        llm_client = LiteLLMClient(base_url=LITELLM_URL, api_key=SecretStr(LITELLM_KEY))
-        stale_executor = RunExecutor(
-            session,
-            llm_client,
-            assigned_attempt=1,  # Attempt 1 (lagging behind attempt 2)
-        )
-
+        llm_client = LiteLLMClient(base_url=LITELLM_URL, api_key=LITELLM_KEY)
+        stale_executor = RunExecutor(session, llm_client, assigned_attempt=1)
         result = await stale_executor.execute_run(stale_run)
         print("Stale worker result:", result)
         assert result.status == "superseded"
         assert result.error_code == "STALE_WORKER_SUPERSEDED"
 
-    # Verify database was NOT corrupted or overwritten by stale worker
     async with SessionFactory() as session:
         refreshed = await session.get(Run, run_id)
         assert refreshed is not None
         assert refreshed.status == "running"
+        assert refreshed.attempt == 2
         assert refreshed.output_payload == {"test_cases": [{"id": "WINNER-ATTEMPT-2"}]}
 
-    print("PASS: Test 3 - Duplicate delivery dropped & stale worker safely fenced.")
+    print("PASS: Test 3 - Duplicate deliveries dropped & stale worker safely fenced.")
 
 
 def start_live_hatchet_worker() -> threading.Thread:

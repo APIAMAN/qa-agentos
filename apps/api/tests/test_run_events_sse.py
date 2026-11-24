@@ -121,15 +121,12 @@ async def test_stream_ticket_lifecycle_redis():
     async def mock_setex(key, ttl, val):
         store[key] = val
 
-    async def mock_get(key):
-        return store.get(key)
-
-    async def mock_delete(key):
-        store.pop(key, None)
+    async def mock_getdel(key):
+        # Redis GETDEL: atomic read-and-delete, the basis of single-use tickets
+        return store.pop(key, None)
 
     mock_redis.setex = AsyncMock(side_effect=mock_setex)
-    mock_redis.get = AsyncMock(side_effect=mock_get)
-    mock_redis.delete = AsyncMock(side_effect=mock_delete)
+    mock_redis.getdel = AsyncMock(side_effect=mock_getdel)
 
     with patch("qa_agentos.runtime.pubsub.get_redis_client", return_value=mock_redis):
         user_id = str(uuid.uuid4())
@@ -155,7 +152,7 @@ async def test_stream_ticket_memory_fallback():
     """Verify stream ticket creation and consumption falls back gracefully to memory when Redis fails."""
     mock_redis = AsyncMock()
     mock_redis.setex = AsyncMock(side_effect=ConnectionError("Redis down"))
-    mock_redis.get = AsyncMock(side_effect=ConnectionError("Redis down"))
+    mock_redis.getdel = AsyncMock(side_effect=ConnectionError("Redis down"))
 
     with patch("qa_agentos.runtime.pubsub.get_redis_client", return_value=mock_redis):
         user_id = str(uuid.uuid4())

@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import uuid
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from qa_agentos.core.errors import NotFoundError
 from qa_agentos.models.domain import Artifact, Run
 from qa_agentos.modules.auth.schemas import Identity
-from qa_agentos.runtime.events import utc_now
+from qa_agentos.runtime.events import queue_run_event, utc_now
 from qa_agentos.runtime.pubsub import RunEventPayload, publish_run_event
 from qa_agentos.runtime.storage import get_storage_client
 from sqlalchemy import func, select
@@ -113,15 +115,23 @@ class ArtifactsService:
     @staticmethod
     async def create_artifact(
         db: AsyncSession,
-        identity: Identity,
+        identity: Optional[Identity],
         project_id: uuid.UUID,
         name: str,
         artifact_type: str,
         data: bytes,
         run_id: Optional[uuid.UUID] = None,
         content_type: str = "application/octet-stream",
+        *,
+        commit: bool = True,
     ) -> Artifact:
-        """Upload object to MinIO and record metadata in database."""
+        """Upload object to MinIO and record metadata in database.
+
+        The blocking MinIO client runs in a worker thread so uploads never stall the event
+        loop. With ``commit=False`` the metadata row joins the caller's transaction and no
+        event is published; the caller commits (used for run outputs, so the artifact row
+        and the run's terminal state are written atomically).
+        """
         if run_id:
             run_stmt = select(Run).where(Run.id == run_id, Run.project_id == project_id)
             run_res = await db.execute(run_stmt)
@@ -141,7 +151,8 @@ class ArtifactsService:
 
         storage = get_storage_client()
         try:
-            minio_key, content_hash, file_size = storage.upload_artifact_bytes(
+            minio_key, content_hash, file_size = await asyncio.to_thread(
+                storage.upload_artifact_bytes,
                 project_id=project_id,
                 run_id=run_id,
                 name=name,
@@ -168,24 +179,32 @@ class ArtifactsService:
             created_at=utc_now(),
         )
         db.add(artifact)
+        await db.flush()
+        created_event = (
+            RunEventPayload(
+                event="artifact.created",
+                run_id=str(run_id),
+                project_id=str(project_id),
+                timestamp=artifact.created_at.isoformat(),
+                data={
+                    "artifact_id": str(artifact.id),
+                    "name": artifact.name,
+                    "artifact_type": artifact.artifact_type,
+                    "file_size_bytes": artifact.file_size_bytes,
+                },
+            )
+            if run_id
+            else None
+        )
+        if not commit:
+            if created_event:
+                queue_run_event(db, created_event)  # published after the caller's commit
+            return artifact
         await db.commit()
         await db.refresh(artifact)
 
-        if run_id:
-            await publish_run_event(
-                RunEventPayload(
-                    event="artifact.created",
-                    run_id=str(run_id),
-                    project_id=str(project_id),
-                    timestamp=artifact.created_at.isoformat(),
-                    data={
-                        "artifact_id": str(artifact.id),
-                        "name": artifact.name,
-                        "artifact_type": artifact.artifact_type,
-                        "file_size_bytes": artifact.file_size_bytes,
-                    },
-                )
-            )
+        if created_event:
+            await publish_run_event(created_event)
 
         logger.info(
             "Recorded artifact in database",
@@ -213,8 +232,28 @@ class ArtifactsService:
 
         storage = get_storage_client()
         try:
-            data, content_type = storage.get_object_data(art.minio_key)
+            data, content_type = await asyncio.to_thread(storage.get_object_data, art.minio_key)
         except StorageError as e:
             logger.error("MinIO storage unavailable during artifact download", error=str(e))
             raise APIError(status_code=503, code="STORAGE_UNAVAILABLE", message="Storage service temporarily unavailable") from e
         return data, content_type, art.name
+
+
+async def store_run_output_artifact(db: AsyncSession, run: Run, output: Dict[str, Any]) -> None:
+    """Executor output sink: persist a succeeded run's output as a JSON artifact.
+
+    Adds the artifact row to the caller's transaction (no commit) and raises on failure,
+    so the executor can record the outcome on the run's terminal event.
+    """
+    raw_bytes = json.dumps(output, indent=2).encode("utf-8")
+    await ArtifactsService.create_artifact(
+        db=db,
+        identity=None,
+        project_id=run.project_id,
+        name=f"testcases-{str(run.id)[:8]}.json",
+        artifact_type="json",
+        data=raw_bytes,
+        run_id=run.id,
+        content_type="application/json",
+        commit=False,
+    )

@@ -103,7 +103,7 @@ class ResolvedModel:
     """Immutable snapshot of the model chosen for a capability slot."""
 
     capability: str
-    model_id: uuid.UUID
+    model_id: Optional[uuid.UUID]
     provider: str
     name: str
     gateway_model_key: str
@@ -123,7 +123,7 @@ class ResolvedModel:
         """JSON-serializable form, suitable for a run's ``resolved_models`` snapshot."""
         return {
             "capability": self.capability,
-            "model_id": str(self.model_id),
+            "model_id": str(self.model_id) if self.model_id else None,
             "provider": self.provider,
             "name": self.name,
             "gateway_model_key": self.gateway_model_key,
@@ -135,6 +135,35 @@ class ResolvedModel:
             "cost_input_per_1m": self.cost_input_per_1m,
             "cost_output_per_1m": self.cost_output_per_1m,
         }
+
+    @classmethod
+    def from_snapshot(cls, snap: Mapping[str, Any], capability: str = "planner") -> "ResolvedModel":
+        """Rebuild a model from a run's persisted ``resolved_models`` entry.
+
+        Deterministic: the same snapshot always yields the same model. ``provider`` and
+        ``gateway_model_key`` are required; a missing ``model_id`` stays ``None`` rather than
+        being invented, so accounting rows never reference a model that does not exist.
+        """
+        missing = [k for k in ("provider", "gateway_model_key") if not snap.get(k)]
+        if missing:
+            raise ValueError(f"Resolved model snapshot for '{capability}' is missing required keys: {missing}")
+        model_id_val = snap.get("model_id") or snap.get("catalog_id")
+        cost_in = snap.get("cost_input_per_1m")
+        cost_out = snap.get("cost_output_per_1m")
+        return cls(
+            capability=snap.get("capability", capability),
+            model_id=uuid.UUID(str(model_id_val)) if model_id_val else None,
+            provider=snap["provider"],
+            name=snap.get("name") or snap.get("model_name") or snap["gateway_model_key"],
+            gateway_model_key=snap["gateway_model_key"],
+            capabilities=tuple(snap.get("capabilities", ["reasoning", "json"])),
+            structured_output=snap.get("structured_output", True),
+            context_window=snap.get("context_window", 128000),
+            max_output_tokens=snap.get("max_output_tokens"),
+            priority=snap.get("priority", 1),
+            cost_input_per_1m=float(cost_in) if cost_in is not None else None,
+            cost_output_per_1m=float(cost_out) if cost_out is not None else None,
+        )
 
 
 def calculate_model_cost(

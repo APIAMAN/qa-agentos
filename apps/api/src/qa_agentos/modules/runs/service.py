@@ -23,7 +23,7 @@ from qa_agentos.models.domain import (
 from qa_agentos.modules.auth.schemas import Identity
 from qa_agentos.modules.runs.dispatcher import RunDispatcher
 from qa_agentos.modules.runs.schemas import RunCreateRequest
-from qa_agentos.runtime.events import TERMINAL_STATUSES, RunStateManager, utc_now
+from qa_agentos.runtime.events import TERMINAL_STATUSES, RunStateManager, commit_and_publish, utc_now
 from qa_agentos.runtime.gateway.errors import NoModelForCapabilityError
 from qa_agentos.runtime.gateway.resolution import ModelResolver
 from sqlalchemy import func, select
@@ -340,7 +340,7 @@ class RunsService:
             state_mgr = RunStateManager(db, run)
             try:
                 await state_mgr.transition_to("cancelled", payload={"cancelled_by": cancelled_by})
-                await db.commit()
+                await commit_and_publish(db)
                 await db.refresh(run)
                 break
             except Exception:

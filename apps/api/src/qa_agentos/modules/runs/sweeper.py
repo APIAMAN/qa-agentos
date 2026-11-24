@@ -112,7 +112,7 @@ async def sweep_outbox(
             hatchet_run_id = await dispatcher.enqueue(run_id)
             if hatchet_run_id:
                 async with session_factory() as session:
-                    update_stmt = update(Run).where(Run.id == run_id).values(hatchet_run_id=str(hatchet_run_id))
+                    update_stmt = update(Run).where(Run.id == run_id, Run.status == "queued").values(hatchet_run_id=str(hatchet_run_id))
                     await session.execute(update_stmt)
                     await session.commit()
                 recovered += 1
@@ -120,14 +120,14 @@ async def sweep_outbox(
             else:
                 logger.warning("Enqueue retry failed or returned no id", run_id=str(run_id))
                 async with session_factory() as session:
-                    clear_stmt = update(Run).where(Run.id == run_id).values(hatchet_run_id=None)
+                    clear_stmt = update(Run).where(Run.id == run_id, Run.status == "queued").values(hatchet_run_id=None)
                     await session.execute(clear_stmt)
                     await session.commit()
         except Exception as exc:
             logger.exception("Unexpected error during outbox sweep enqueue", run_id=str(run_id), error=str(exc))
             try:
                 async with session_factory() as session:
-                    clear_stmt = update(Run).where(Run.id == run_id).values(hatchet_run_id=None)
+                    clear_stmt = update(Run).where(Run.id == run_id, Run.status == "queued").values(hatchet_run_id=None)
                     await session.execute(clear_stmt)
                     await session.commit()
             except Exception:

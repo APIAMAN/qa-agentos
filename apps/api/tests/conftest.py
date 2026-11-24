@@ -1,6 +1,7 @@
 import asyncio
 import os
 import pathlib
+import sys
 from typing import AsyncGenerator
 
 import asyncpg
@@ -17,6 +18,11 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+
+# psycopg (LangGraph's PostgreSQL checkpointer) cannot run on Windows' default Proactor loop.
+# Set the policy for the whole session rather than relying on test-module import order.
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 # SQLite in-memory for fast unit testing
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"

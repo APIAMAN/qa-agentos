@@ -19,6 +19,7 @@ from typing import Any, Awaitable, Callable, Mapping, Optional, Sequence
 import jsonschema
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from structlog import get_logger
 
 from qa_agentos.models.domain import AgentVersion, RunStep, ToolDefinition
 from qa_agentos.runtime.tools.builtin.util import echo
@@ -35,6 +36,8 @@ from qa_agentos.runtime.tools.errors import (
     ToolTimeoutError,
     ToolVersionUnavailableError,
 )
+
+logger = get_logger(__name__)
 
 ToolCallable = Callable[[Mapping[str, Any], Any], Awaitable[dict[str, Any]]]
 
@@ -63,6 +66,14 @@ class ToolExecutionContext:
     project_id: uuid.UUID
     agent_version: AgentVersion
     granted_permissions: Optional[Sequence[str]] = None
+    #: Run attempt (fencing token) executing this call; each attempt records its own step row.
+    attempt: int = 1
+
+    @property
+    def idempotency_key(self) -> str:
+        """Stable across attempts of the same logical call: pass it to external APIs that accept
+        idempotency keys so a call repeated after a crash is de-duplicated downstream."""
+        return f"qa-agentos:{self.run_id}:{self.step_number}"
 
 
 @dataclass(frozen=True)
@@ -89,8 +100,12 @@ class ToolDispatcher:
         *,
         custom_implementations: Optional[dict[str, ToolCallable]] = None,
         backoff_multiplier: float = 0.05,
+        commit_on_record: bool = False,
     ) -> None:
         self._session = session
+        # When True, each recorded step is committed immediately so a crash after a tool's
+        # side effect cannot lose the record that prevents re-executing it on recovery.
+        self._commit_on_record = commit_on_record
         self._implementations = dict(APPROVED_BUILTIN_TOOLS)
         if custom_implementations:
             self._implementations.update(custom_implementations)
@@ -242,22 +257,34 @@ class ToolDispatcher:
         context: ToolExecutionContext,
         request: ToolInvocationRequest,
     ) -> Optional[ToolExecutionResult]:
-        """Check for existing step to enforce idempotency and detect conflicting replay input."""
-        stmt = select(RunStep).where(
-            RunStep.run_id == context.run_id,
-            RunStep.step_number == context.step_number,
+        """Enforce idempotency across attempts and detect conflicting replays.
+
+        - A matching step that already succeeded in *any* attempt is returned from cache, so
+          recovery never repeats a completed tool side effect.
+        - Within the same attempt, a matching failed step re-raises its failure and a
+          different tool/input at the same step number is a conflict.
+        - A step that failed in an earlier attempt is executed again (that is the retry).
+        """
+        stmt = (
+            select(RunStep)
+            .where(
+                RunStep.run_id == context.run_id,
+                RunStep.step_number == context.step_number,
+            )
+            .order_by(RunStep.attempt.asc())
         )
-        existing = (await self._session.execute(stmt)).scalar_one_or_none()
-        if existing is None:
+        rows = list((await self._session.execute(stmt)).scalars().all())
+        if not rows:
             return None
 
         expected_node = f"tool:{request.tool_name}@{request.tool_version}"
-        # Canonical comparison of input dictionaries
         canonical_input = json.dumps(dict(request.input_data), sort_keys=True)
-        existing_input = json.dumps(existing.input_data, sort_keys=True)
 
-        if existing.node == expected_node and existing_input == canonical_input:
-            if existing.status == "succeeded":
+        def matches(step: RunStep) -> bool:
+            return step.node == expected_node and json.dumps(step.input_data, sort_keys=True) == canonical_input
+
+        for existing in rows:
+            if matches(existing) and existing.status == "succeeded":
                 return ToolExecutionResult(
                     run_id=existing.run_id,
                     step_number=existing.step_number,
@@ -269,18 +296,24 @@ class ToolDispatcher:
                     latency_ms=existing.latency_ms or 0,
                     from_cache=True,
                 )
-            if existing.status == "failed":
-                err = existing.error or {}
-                raise ToolExecutionFailedError(
-                    f"Prior execution of step {context.step_number} failed: {err.get('message', 'Unknown')}",
-                    details=err,
-                )
+
+        same_attempt = [r for r in rows if r.attempt == context.attempt]
+        if not same_attempt:
+            return None
+        existing = same_attempt[0]
+        if matches(existing) and existing.status == "failed":
+            err = existing.error or {}
+            raise ToolExecutionFailedError(
+                f"Prior execution of step {context.step_number} failed: {err.get('message', 'Unknown')}",
+                details=err,
+            )
 
         raise ToolStepConflictError(
             f"Step {context.step_number} already exists for run {context.run_id} with conflicting input or tool.",
             details={
                 "run_id": str(context.run_id),
                 "step_number": context.step_number,
+                "attempt": context.attempt,
                 "existing_node": existing.node,
                 "requested_node": expected_node,
             },
@@ -305,7 +338,7 @@ class ToolDispatcher:
             step_number=context.step_number,
             step_type="tool_call",
             node=node,
-            attempt=attempt,
+            attempt=context.attempt,
             input_data=dict(input_data),
             output_data=output_data,
             status=status_val,
@@ -315,6 +348,8 @@ class ToolDispatcher:
         )
         self._session.add(step)
         await self._session.flush()
+        if self._commit_on_record:
+            await self._session.commit()
         return step
 
     async def dispatch(
@@ -433,6 +468,7 @@ class ToolDispatcher:
                 "code": exc.code,
                 "message": exc.message,
                 "details": exc.details,
+                "tool_attempts": attempt,
             }
             # Record failed step in database
             try:
@@ -447,7 +483,14 @@ class ToolDispatcher:
                     latency_ms=latency_ms,
                     error_val=err_dict,
                 )
-            except Exception:
-                # Do not let step recording failure mask original domain exception
-                pass
+            except Exception as record_exc:
+                # Do not let step recording failure mask the original domain exception, but
+                # never hide it either: the session must be usable for the run's own writes.
+                logger.error(
+                    "Failed to record failed tool step",
+                    run_id=str(context.run_id),
+                    step_number=context.step_number,
+                    error=str(record_exc),
+                )
+                await self._session.rollback()
             raise

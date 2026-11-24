@@ -186,7 +186,15 @@ class Run(Base):
         UUID(as_uuid=True), ForeignKey("api_keys.id", ondelete="SET NULL"), nullable=True
     )
     hatchet_run_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    # Monotonic fencing token: bumped on every retry/resume claim. Stale workers whose
+    # assigned attempt is lower than this value may not write steps or terminal states.
     attempt: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    # Hatchet-local attempt number (1-based per task run) of the owning delivery.
+    hatchet_attempt: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Set when an approval resumes the run; consumed exactly once by the resuming worker.
+    resume_requested_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Liveness signal refreshed at claim time and after every graph superstep.
+    heartbeat_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     error_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     error: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSONB, nullable=True)
     tokens_input: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -219,6 +227,7 @@ class Run(Base):
             "status",
             text("created_at DESC"),
         ),
+        Index("ix_runs_status_heartbeat_at", "status", "heartbeat_at"),
     )
 
 
@@ -246,7 +255,10 @@ class RunStep(Base):
 
     run: Mapped["Run"] = relationship("Run", back_populates="steps")
 
-    __table_args__ = (UniqueConstraint("run_id", "step_number", name="uq_run_steps_run_id_step_number"),)
+    # One row per (step, attempt): a retried attempt never overwrites an earlier attempt's record.
+    __table_args__ = (
+        UniqueConstraint("run_id", "step_number", "attempt", name="uq_run_steps_run_id_step_number_attempt"),
+    )
 
 
 class RunEvent(Base):

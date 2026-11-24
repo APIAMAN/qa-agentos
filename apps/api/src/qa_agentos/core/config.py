@@ -54,6 +54,23 @@ class Settings(BaseSettings):
     HATCHET_TASK_RETRIES: int = 2
     HATCHET_SWEEPER_INTERVAL_SECONDS: int = 60
     HATCHET_SWEEPER_THRESHOLD_SECONDS: int = 30
+    # A preparing/running run whose heartbeat is older than this is considered abandoned.
+    # Unset = one task timeout plus a 5-minute grace period; a healthy attempt refreshes its
+    # heartbeat after every graph superstep and can never outlive the task timeout.
+    RUN_STALE_AFTER_SECONDS: Optional[int] = None
+    # Durable LangGraph checkpoints for the Hatchet worker (PostgreSQL, schema "langgraph").
+    WORKER_CHECKPOINTER_ENABLED: bool = True
+
+    @property
+    def run_stale_after_seconds(self) -> int:
+        if self.RUN_STALE_AFTER_SECONDS is not None:
+            return max(60, self.RUN_STALE_AFTER_SECONDS)
+        return self.HATCHET_TASK_TIMEOUT_MINUTES * 60 + 300
+
+    @property
+    def hatchet_max_attempts(self) -> int:
+        """Total Hatchet attempts per task run (initial attempt + retries)."""
+        return self.HATCHET_TASK_RETRIES + 1
 
     # Langfuse Observability
     LANGFUSE_PUBLIC_KEY: Optional[str] = None

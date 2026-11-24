@@ -11,7 +11,7 @@ import json
 import secrets
 import time
 import uuid
-from typing import Any, AsyncGenerator, Dict, Optional, Tuple, cast
+from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, List, Optional, Tuple, cast
 
 import redis.asyncio as aioredis
 from pydantic import BaseModel, Field
@@ -28,6 +28,13 @@ _MEMORY_TICKETS: Dict[str, Tuple[Dict[str, str], float]] = {}
 def get_run_events_channel(project_id: str | uuid.UUID, run_id: str | uuid.UUID) -> str:
     """Return the scoped Redis Pub/Sub channel for run events."""
     return f"projects:{project_id}:runs:{run_id}:events"
+
+
+_TERMINAL_EVENTS = ("run.succeeded", "run.failed", "run.cancelled")
+
+
+def _is_terminal_frame(frame: str) -> bool:
+    return any(f"event: {name}\n" in frame for name in _TERMINAL_EVENTS)
 
 
 class RunEventPayload(BaseModel):
@@ -59,8 +66,9 @@ async def get_redis_client() -> aioredis.Redis:
     if _redis_client is None or _client_loop != current_loop or current_loop.is_closed():
         _client_loop = current_loop
         url = settings.REDIS_URL
-        # Auto-detect forwarder fallback if default localhost:6379 fails on Windows WSL
-        if ":6379" in url:
+        # Local-dev convenience only (Windows/WSL port forwarder). Never in production, where it
+        # could silently redirect event traffic to whatever listens on localhost:6381.
+        if ":6379" in url and settings.ENVIRONMENT != "production":
             import socket
             sock = socket.socket()
             sock.settimeout(0.2)
@@ -170,9 +178,8 @@ async def consume_stream_ticket(ticket: str) -> Optional[Dict[str, str]]:
     try:
         r = await get_redis_client()
         key = f"stream_ticket:{ticket}"
-        raw = await r.get(key)
+        raw = await r.getdel(key)  # Atomic single-use consumption (no get/delete race)
         if raw:
-            await r.delete(key)  # Single-use consumption
             return cast(Optional[dict[str, str]], json.loads(raw))
     except Exception as exc:
         logger.warning("Failed to consume ticket from Redis; checking memory store", error=str(exc))
@@ -192,8 +199,15 @@ async def subscribe_run_events(
     run_id: str | uuid.UUID,
     *,
     heartbeat_interval_seconds: float = 15.0,
+    after_subscribe: Optional[Callable[[], Awaitable[List[str]]]] = None,
 ) -> AsyncGenerator[str, None]:
-    """Async generator yielding SSE formatted event strings and heartbeats from Redis Pub/Sub."""
+    """Async generator yielding SSE formatted event strings and heartbeats from Redis Pub/Sub.
+
+    ``after_subscribe`` runs once the subscription is active and returns frames to emit
+    first (e.g. a fresh database snapshot). Subscribing *before* reading state means an
+    event published in between is buffered rather than lost. If a returned frame is a
+    terminal run event, the stream ends after emitting it.
+    """
     channel = get_run_events_channel(project_id, run_id)
     r = await get_redis_client()
     pubsub = r.pubsub()
@@ -201,6 +215,13 @@ async def subscribe_run_events(
     try:
         await pubsub.subscribe(channel)
         logger.info("Subscribed to run events channel", channel=channel)
+
+        if after_subscribe is not None:
+            initial_frames = await after_subscribe()
+            for frame in initial_frames:
+                yield frame
+            if any(_is_terminal_frame(f) for f in initial_frames):
+                return
 
         while True:
             try:

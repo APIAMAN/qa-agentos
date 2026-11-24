@@ -16,6 +16,7 @@ from qa_agentos.runtime.graph.nodes import (
     execute_tools_node,
     finalize_node,
     generate_node,
+    max_steps_exceeded_node,
     prepare_node,
     repair_node,
     route_after_generate,
@@ -32,7 +33,8 @@ def build_generic_react_graph(
     """Build and compile the generic React StateGraph.
 
     Logical flow:
-    prepare -> generate -> [execute_tools (if tools requested) -> generate | validate_output]
+    prepare -> generate -> [execute_tools (if tools requested and within max_steps) -> generate
+                          | max_steps_exceeded -> finalize | validate_output]
     validate_output -> [finalize -> END (if valid or exhausted) | repair -> generate (if repair_count < max_repairs)]
     """
     graph = StateGraph(AgentState)
@@ -44,6 +46,7 @@ def build_generic_react_graph(
     graph.add_node("validate_output", validate_output_node)
     graph.add_node("repair", repair_node)
     graph.add_node("finalize", finalize_node)
+    graph.add_node("max_steps_exceeded", max_steps_exceeded_node)
 
     # Edges
     graph.add_edge(START, "prepare")
@@ -55,6 +58,7 @@ def build_generic_react_graph(
         {
             "execute_tools": "execute_tools",
             "validate_output": "validate_output",
+            "max_steps_exceeded": "max_steps_exceeded",
         },
     )
 
@@ -70,6 +74,7 @@ def build_generic_react_graph(
     )
 
     graph.add_edge("repair", "generate")
+    graph.add_edge("max_steps_exceeded", "finalize")
     graph.add_edge("finalize", END)
 
     return graph.compile(

@@ -8,7 +8,7 @@ from typing import Any, List, Optional, Tuple
 from qa_agentos.core.errors import ConflictError, NotFoundError
 from qa_agentos.models.domain import Approval, Run
 from qa_agentos.modules.auth.schemas import Identity
-from qa_agentos.runtime.events import RunStateManager, utc_now
+from qa_agentos.runtime.events import RunStateManager, commit_and_publish, utc_now
 from qa_agentos.runtime.pubsub import RunEventPayload, publish_run_event
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -57,7 +57,7 @@ class ApprovalsService:
             created_at=utc_now(),
         )
         db.add(approval)
-        await db.commit()
+        await commit_and_publish(db)
         await db.refresh(approval)
 
         # 4. Publish real-time approval event
@@ -194,6 +194,10 @@ class ApprovalsService:
             .join(Run, Approval.run_id == Run.id)
             .where(Approval.id == approval_id, Run.project_id == project_id)
         )
+        if db.bind and db.bind.dialect.name == "postgresql":
+            # Serialize concurrent decisions on the same approval: the second one sees the
+            # first decision and is rejected with 409 instead of contradicting it.
+            stmt = stmt.with_for_update(of=Approval)
         res = await db.execute(stmt)
         row = res.first()
         if not row:
@@ -224,6 +228,10 @@ class ApprovalsService:
                     "running",
                     payload={"approval_id": str(approval.id), "decision_note": decision_note},
                 )
+                # Durable resume intent: the next worker delivery claims it exactly once (see
+                # workers.main.claim_run); stale-run recovery re-dispatches it if the dispatch is lost.
+                run.resume_requested_at = now
+                run.heartbeat_at = now
         elif decision == "rejected":
             if run.status in ("waiting_for_approval", "running", "preparing", "queued"):
                 await state_mgr.transition_to(
@@ -231,7 +239,7 @@ class ApprovalsService:
                     payload={"approval_id": str(approval.id), "rejection_note": decision_note},
                 )
 
-        await db.commit()
+        await commit_and_publish(db)
         await db.refresh(approval)
 
         await publish_run_event(

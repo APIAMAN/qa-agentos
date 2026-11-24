@@ -197,11 +197,15 @@ export default function RunDetailPage() {
     };
   }, [fetchRunDetail, token]);
 
+  // Only terminal-ness drives the stream lifecycle. Re-subscribing on every status change
+  // (queued -> preparing -> running) dropped events published during each reconnect gap.
+  const isRunTerminal = run ? TERMINAL_STATUSES.has(run.status) : false;
+
   // Server-Sent Events (SSE) streaming with ticket authentication
   useEffect(() => {
     if (!token || !runId) return;
 
-    if (run && TERMINAL_STATUSES.has(run.status)) {
+    if (isRunTerminal) {
       setStreamStatus("closed");
       return;
     }
@@ -400,7 +404,7 @@ export default function RunDetailPage() {
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runId, token, run?.status, apiFetch, fetchRunDetail]);
+  }, [runId, token, isRunTerminal, apiFetch, fetchRunDetail]);
 
   const handleCancel = async () => {
     if (!runId || cancelling) return;

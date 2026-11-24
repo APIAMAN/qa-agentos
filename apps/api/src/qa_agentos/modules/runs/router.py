@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, Header, Query, Response, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, StreamingResponse
 from qa_agentos.core.database import get_db
+from qa_agentos.models.domain import Run
 from qa_agentos.modules.auth.schemas import Identity
 from qa_agentos.modules.auth.service import require_scope
 from qa_agentos.modules.runs.dispatcher import RunDispatcher, get_dispatcher
@@ -195,41 +196,51 @@ async def stream_run_events(
         project_id = await resolve_project_id(db, identity, x_project_id)
 
     run = await RunsService.get_run(db=db, run_id=run_id, project_id=project_id)
+    run_pk = run.id
+    project_key = str(project_id)
+    # End the request transaction so its pooled connection is released: the stream can stay
+    # open for the whole run, and holding a connection per open page would exhaust the pool.
+    await db.commit()
 
-    async def event_generator() -> AsyncGenerator[str, None]:
-        # Terminal check: if already completed/failed/cancelled, yield state and close
-        if run.status in TERMINAL_STATUSES:
-            term_payload = RunEventPayload(
-                event=f"run.{run.status}",
-                run_id=str(run.id),
-                project_id=str(project_id),
-                timestamp=(run.finished_at or utc_now()).isoformat(),
+    def snapshot_frame(current: Run) -> str:
+        if current.status in TERMINAL_STATUSES:
+            payload = RunEventPayload(
+                event=f"run.{current.status}",
+                run_id=str(current.id),
+                project_id=project_key,
+                timestamp=(current.finished_at or utc_now()).isoformat(),
                 data={
-                    "status": run.status,
-                    "tokens_input": run.tokens_input,
-                    "tokens_output": run.tokens_output,
-                    "cost_usd": run.cost_usd,
-                    "error_message": run.error_message,
+                    "status": current.status,
+                    "tokens_input": current.tokens_input,
+                    "tokens_output": current.tokens_output,
+                    "cost_usd": current.cost_usd,
+                    "error_message": current.error_message,
                 },
             )
-            yield term_payload.format_sse()
+        else:
+            payload = RunEventPayload(
+                event=f"run.{current.status}",
+                run_id=str(current.id),
+                project_id=project_key,
+                timestamp=(current.started_at or current.created_at or utc_now()).isoformat(),
+                data={"status": current.status, "attempt": current.attempt or 1},
+            )
+        return payload.format_sse()
+
+    async def fresh_snapshot() -> List[str]:
+        # Read state *after* subscribing, so a transition published in between is not lost.
+        current = await db.get(Run, run_pk, populate_existing=True)
+        frames = [snapshot_frame(current)] if current else []
+        await db.commit()  # release the connection again
+        return frames
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        if run.status in TERMINAL_STATUSES:
+            yield snapshot_frame(run)
             return
-
-        # Initial state snapshot
-        init_payload = RunEventPayload(
-            event=f"run.{run.status}",
-            run_id=str(run.id),
-            project_id=str(project_id),
-            timestamp=(run.started_at or run.created_at or utc_now()).isoformat(),
-            data={
-                "status": run.status,
-                "attempt": run.attempt or 1,
-            },
-        )
-        yield init_payload.format_sse()
-
-        # Stream live Pub/Sub events
-        async for frame in subscribe_run_events(project_id=str(project_id), run_id=str(run_id)):
+        async for frame in subscribe_run_events(
+            project_id=project_key, run_id=str(run_id), after_subscribe=fresh_snapshot
+        ):
             yield frame
 
     return StreamingResponse(

@@ -8,14 +8,20 @@ from __future__ import annotations
 import asyncio
 import uuid
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set
 
 from qa_agentos.core.config import Settings
 from qa_agentos.core.config import settings as global_settings
 from qa_agentos.core.database import AsyncSessionLocal
+from qa_agentos.core.errors import APIError
 from qa_agentos.models.domain import Run
-from qa_agentos.runtime.events import TERMINAL_STATUSES, RunStateManager, RunTerminalStateError
-from qa_agentos.runtime.executor import RunExecutor
+from qa_agentos.runtime.events import (
+    TERMINAL_STATUSES,
+    RunStateManager,
+    RunTerminalStateError,
+    commit_and_publish,
+)
+from qa_agentos.runtime.executor import OutputSink, RunExecutor
 from qa_agentos.runtime.gateway.client import LiteLLMClient
 from qa_agentos.runtime.gateway.resolution import ModelResolver, ProviderPolicy
 from sqlalchemy import update
@@ -59,8 +65,10 @@ class InlineDispatcher(RunDispatcher):
         *,
         model_resolver: Optional[ModelResolver] = None,
         checkpointer: Optional[Any] = None,
+        output_sink: Optional[OutputSink] = None,
     ) -> None:
         self.session_factory = session_factory
+        self.output_sink = output_sink
         self.litellm_client = litellm_client
         self.model_resolver = model_resolver
         from langgraph.checkpoint.memory import MemorySaver
@@ -74,10 +82,13 @@ class InlineDispatcher(RunDispatcher):
         litellm_client = LiteLLMClient.from_settings(app_settings)
         policy = ProviderPolicy.from_settings(app_settings)
         resolver = ModelResolver(policy)
+        from qa_agentos.modules.artifacts.service import store_run_output_artifact
+
         return cls(
             session_factory=session_factory,
             litellm_client=litellm_client,
             model_resolver=resolver,
+            output_sink=store_run_output_artifact,
         )
 
     def is_in_flight(self, run_id: uuid.UUID) -> bool:
@@ -117,33 +128,47 @@ class InlineDispatcher(RunDispatcher):
                     logger.info("Run already terminal before execution", run_id=str(run_id), status=run.status)
                     return
 
+                # Inline execution does not use Hatchet claims; consume any approval resume marker
+                # so stale-run recovery does not dispatch the resume a second time.
+                if run.resume_requested_at is not None:
+                    run.resume_requested_at = None
+                    await session.commit()
+
                 executor = RunExecutor(
                     session,
                     self.litellm_client,
                     model_resolver=self.model_resolver,
                     checkpointer=self.checkpointer,
+                    output_sink=self.output_sink,
                 )
                 await executor.execute_run(run)
-                await session.commit()
-        except (asyncio.CancelledError, RunTerminalStateError):
-            logger.info("Run execution worker task cancelled or terminated", run_id=str(run_id))
+                await commit_and_publish(session)
+        except RunTerminalStateError:
+            logger.info("Run execution worker found run already terminal", run_id=str(run_id))
+        except asyncio.CancelledError:
+            # Cancellation by the user leaves the run already 'cancelled'. Any other cancellation
+            # (process shutdown) interrupts an in-memory execution that cannot resume: fail it
+            # explicitly instead of leaving it 'running' forever.
+            logger.info("Run execution worker task cancelled", run_id=str(run_id))
+            await self._fail_if_active(run_id, "EXECUTION_INTERRUPTED", "Execution was interrupted (process shutdown).")
         except Exception as exc:
             logger.exception("Unexpected exception in run execution worker", run_id=str(run_id), error=str(exc))
-            try:
-                async with self.session_factory() as session:
-                    run = await session.get(Run, run_id)
-                    if run and run.status not in TERMINAL_STATUSES:
-                        state_mgr = RunStateManager(session, run)
-                        await state_mgr.transition_to(
-                            "failed",
-                            payload={
-                                "error_code": "INTERNAL_EXECUTION_ERROR",
-                                "error_message": str(exc),
-                            },
-                        )
-                        await session.commit()
-            except Exception:
-                logger.exception("Failed to update run status after worker crash", run_id=str(run_id))
+            code = exc.code if isinstance(exc, APIError) else "INTERNAL_EXECUTION_ERROR"
+            await self._fail_if_active(run_id, code, str(exc))
+
+    async def _fail_if_active(self, run_id: uuid.UUID, code: str, message: str) -> None:
+        try:
+            async with self.session_factory() as session:
+                run = await session.get(Run, run_id)
+                if run and run.status not in TERMINAL_STATUSES:
+                    state_mgr = RunStateManager(session, run)
+                    await state_mgr.transition_to(
+                        "failed",
+                        payload={"error_code": code, "error_message": message},
+                    )
+                    await commit_and_publish(session)
+        except Exception:
+            logger.exception("Failed to update run status after worker failure", run_id=str(run_id))
 
     async def wait_for_run(self, run_id: uuid.UUID, timeout: float = 30.0) -> None:
         """Helper for test suites to await in-flight task completion."""
@@ -171,6 +196,8 @@ class HatchetDispatcher(RunDispatcher):
     ) -> None:
         self.hatchet = hatchet_client
         self.session_factory = session_factory
+        # Strong references keep fire-and-forget tasks alive until they finish.
+        self._background_tasks: Set[asyncio.Task[Any]] = set()
 
     @classmethod
     def from_settings(cls, s: Optional[Settings] = None) -> "HatchetDispatcher":
@@ -209,7 +236,12 @@ class HatchetDispatcher(RunDispatcher):
             # Persist hatchet_run_id safely
             try:
                 async with self.session_factory() as session:
-                    stmt = update(Run).where(Run.id == run_id).values(hatchet_run_id=str(hatchet_run_id))
+                    # Only while unclaimed: once a worker claimed the run, it owns hatchet_run_id.
+                    stmt = (
+                        update(Run)
+                        .where(Run.id == run_id, Run.status == "queued")
+                        .values(hatchet_run_id=str(hatchet_run_id))
+                    )
                     await session.execute(stmt)
                     await session.commit()
             except Exception as db_exc:
@@ -230,13 +262,26 @@ class HatchetDispatcher(RunDispatcher):
             )
             return None
 
+    def _spawn(self, coro: Any, name: str) -> None:
+        task: asyncio.Task[Any] = asyncio.create_task(coro, name=name)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._on_background_done)
+
+    def _on_background_done(self, task: asyncio.Task[Any]) -> None:
+        self._background_tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            logger.error("Background Hatchet task failed", task=task.get_name(), error=str(task.exception()))
+
     def dispatch(self, run_id: uuid.UUID) -> None:
-        """Schedule non-blocking enqueue via background task."""
-        asyncio.create_task(self.enqueue(run_id), name=f"hatchet-dispatch-{run_id}")
+        """Schedule non-blocking enqueue via a tracked background task.
+
+        A lost enqueue is recovered by the outbox sweeper (run stays queued, unassigned).
+        """
+        self._spawn(self.enqueue(run_id), f"hatchet-dispatch-{run_id}")
 
     def cancel(self, run_id: uuid.UUID) -> None:
         """Send cancellation to Hatchet engine if run is associated with a Hatchet task."""
-        asyncio.create_task(self._async_cancel(run_id), name=f"hatchet-cancel-{run_id}")
+        self._spawn(self._async_cancel(run_id), f"hatchet-cancel-{run_id}")
 
     async def _async_cancel(self, run_id: uuid.UUID) -> None:
         try:
@@ -253,8 +298,10 @@ class HatchetDispatcher(RunDispatcher):
             logger.warning("Failed to cancel Hatchet workflow run", run_id=str(run_id), error=str(exc))
 
     async def shutdown(self, timeout: float = 5.0) -> None:
-        """No background persistent state in Hatchet client to drain."""
-        pass
+        """Let in-flight enqueue/cancel calls finish (bounded by ``timeout``)."""
+        pending = [t for t in self._background_tasks if not t.done()]
+        if pending:
+            await asyncio.wait(pending, timeout=timeout)
 
 
 _global_dispatcher: Optional[RunDispatcher] = None

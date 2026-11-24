@@ -130,25 +130,7 @@ async def generate_node(state: AgentState, config: RunnableConfig) -> Dict[str, 
     if isinstance(resolved_model_dict, ResolvedModel):
         resolved_model = resolved_model_dict
     elif isinstance(resolved_model_dict, dict):
-        model_id_val = resolved_model_dict.get("model_id") or resolved_model_dict.get("catalog_id")
-        resolved_model = ResolvedModel(
-            capability=resolved_model_dict.get("capability", "planner"),
-            model_id=uuid.UUID(str(model_id_val)) if model_id_val else uuid.uuid4(),
-            provider=resolved_model_dict["provider"],
-            name=resolved_model_dict.get("name") or resolved_model_dict.get("model_name", "mock-model"),
-            gateway_model_key=resolved_model_dict["gateway_model_key"],
-            capabilities=tuple(resolved_model_dict.get("capabilities", ["reasoning", "json"])),
-            structured_output=resolved_model_dict.get("structured_output", True),
-            context_window=resolved_model_dict.get("context_window", 128000),
-            max_output_tokens=resolved_model_dict.get("max_output_tokens"),
-            priority=resolved_model_dict.get("priority", 1),
-            cost_input_per_1m=float(resolved_model_dict["cost_input_per_1m"])
-            if resolved_model_dict.get("cost_input_per_1m") is not None
-            else None,
-            cost_output_per_1m=float(resolved_model_dict["cost_output_per_1m"])
-            if resolved_model_dict.get("cost_output_per_1m") is not None
-            else None,
-        )
+        resolved_model = ResolvedModel.from_snapshot(resolved_model_dict, "planner")
     else:
         raise ValueError("No valid resolved_model provided in state or config")
 
@@ -303,10 +285,35 @@ async def generate_node(state: AgentState, config: RunnableConfig) -> Dict[str, 
 
 
 def route_after_generate(state: AgentState) -> str:
-    """Conditional edge after generation."""
-    if state.get("pending_tool_calls"):
+    """Conditional edge after generation.
+
+    Tool calls are only executed while they fit in the step budget (``max_steps``); a model
+    that keeps requesting tools ends the run with ``MAX_STEPS_EXCEEDED`` instead of looping
+    until LangGraph's recursion limit aborts it.
+    """
+    pending = state.get("pending_tool_calls") or []
+    if pending:
+        max_steps = state.get("max_steps", 10)
+        if state.get("step_count", 0) + len(pending) > max_steps:
+            return "max_steps_exceeded"
         return "execute_tools"
     return "validate_output"
+
+
+async def max_steps_exceeded_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+    """Terminal failure when the agent's step budget is exhausted."""
+    max_steps = state.get("max_steps", 10)
+    return {
+        "status": "failed",
+        "pending_tool_calls": [],
+        "error_code": "MAX_STEPS_EXCEEDED",
+        "error_message": f"Agent exceeded its step budget of {max_steps} steps.",
+        "error_details": {
+            "max_steps": max_steps,
+            "step_count": state.get("step_count", 0),
+            "requested_tool_calls": len(state.get("pending_tool_calls") or []),
+        },
+    }
 
 
 async def execute_tools_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
@@ -344,6 +351,7 @@ async def execute_tools_node(state: AgentState, config: RunnableConfig) -> Dict[
                 project_id=uuid.UUID(state["project_id"]) if state.get("project_id") else uuid.uuid4(),
                 agent_version=agent_version_entity,
                 granted_permissions=state.get("permissions", []),
+                attempt=int(configurable.get("assigned_attempt", 1)),
             )
             request = ToolInvocationRequest(
                 tool_name=tool_name,

@@ -578,12 +578,19 @@ async def test_worker_crash_recovery_resumes_from_checkpoint(seeded_h_db):
 
     assert result["status"] == "succeeded"
 
-    # Verify steps in DB: no duplicate step 1
+    # M3 contract: each attempt keeps its own step rows; the retry never overwrites attempt 1.
     async with sf() as session:
-        stmt_steps = select(RunStep).where(RunStep.run_id == run_id).order_by(RunStep.step_number.asc())
+        stmt_steps = select(RunStep).where(RunStep.run_id == run_id).order_by(
+            RunStep.step_number.asc(), RunStep.attempt.asc()
+        )
         steps = (await session.execute(stmt_steps)).scalars().all()
-        step_numbers = [s.step_number for s in steps]
-        assert len(step_numbers) == len(set(step_numbers)), f"Duplicate steps found: {step_numbers}"
+        keys = [(s.step_number, s.attempt) for s in steps]
+        assert len(keys) == len(set(keys)), f"Duplicate (step, attempt) rows found: {keys}"
+        attempt1 = [s for s in steps if s.attempt == 1]
+        assert len(attempt1) == 1 and attempt1[0].output_data == {"raw_output": "partial"}, (
+            "Attempt 1's history must be preserved untouched"
+        )
+        assert any(s.attempt == 2 for s in steps), "Retry attempt must record its own steps"
 
 
 @pytest.mark.asyncio

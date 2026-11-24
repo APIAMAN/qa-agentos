@@ -1,7 +1,15 @@
 """High-level RunExecutor interface for direct, inline execution of Agent runs.
 
 Executes runs through the generic LangGraph runtime, model gateway, tool dispatcher,
-and PostgreSQL checkpointer without requiring Hatchet or HTTP background queues.
+and checkpointer without requiring Hatchet or HTTP background queues.
+
+Reliability contract (M3):
+- Every write is fenced by ``assigned_attempt``: once a newer attempt has claimed the run,
+  this executor may no longer record steps or terminal states.
+- Step and model-call records are committed inside the node, before LangGraph saves the
+  superstep checkpoint, so application history is never behind the checkpoint.
+- Each attempt records its own step rows; retries never overwrite earlier attempts.
+- Live events are published only after the commit that makes them true.
 """
 
 from __future__ import annotations
@@ -9,13 +17,14 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Sequence, cast
+from typing import Any, Awaitable, Callable, Dict, Optional, Sequence, cast
 
 import jsonschema
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.errors import GraphRecursionError
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from structlog import get_logger
 
 from qa_agentos.core.tracing import Tracer, get_tracer
@@ -29,16 +38,39 @@ from qa_agentos.models.domain import (
 from qa_agentos.runtime.events import (
     TERMINAL_STATUSES,
     RunStateManager,
+    RunSupersededError,
     RunTerminalStateError,
+    commit_and_publish,
+    queue_run_event,
     utc_now,
 )
 from qa_agentos.runtime.gateway.client import LiteLLMClient
 from qa_agentos.runtime.gateway.resolution import ModelResolver, ResolvedModel
 from qa_agentos.runtime.graph.builder import build_generic_react_graph
+from qa_agentos.runtime.graph.checkpointer import fenced_checkpointer
 from qa_agentos.runtime.graph.state import AgentState
 from qa_agentos.runtime.tools.dispatcher import ToolDispatcher
 
 logger = get_logger(__name__)
+
+#: Persists a succeeded run's output somewhere durable (e.g. an artifact). It must only add
+#: rows to the given session, never commit, and raise on failure.
+OutputSink = Callable[[AsyncSession, Run, Dict[str, Any]], Awaitable[None]]
+
+DEFAULT_MAX_STEPS = 10
+DEFAULT_MAX_REPAIRS = 2
+
+
+def graph_recursion_limit(parameters: Optional[Dict[str, Any]]) -> int:
+    """LangGraph superstep budget large enough that ``max_steps``/``max_repairs`` bind first.
+
+    prepare + (generate, execute_tools) per tool step + (validate, repair, generate) per repair
+    + final validate/finalize, with headroom.
+    """
+    params = parameters or {}
+    max_steps = int(params.get("max_steps", DEFAULT_MAX_STEPS))
+    max_repairs = int(params.get("max_repairs", DEFAULT_MAX_REPAIRS))
+    return 2 * max_steps + 3 * max_repairs + 10
 
 
 @dataclass(frozen=True)
@@ -46,7 +78,7 @@ class RunExecutionResult:
     """Terminal outcome of an executed run."""
 
     run_id: uuid.UUID
-    status: str  # "succeeded", "failed", "running"
+    status: str  # "succeeded", "failed", "running", "waiting_for_approval", "superseded", "cancelled"
     output_payload: Optional[Dict[str, Any]] = None
     error_code: Optional[str] = None
     error_message: Optional[str] = None
@@ -70,6 +102,7 @@ class RunExecutor:
         checkpointer: Optional[BaseCheckpointSaver[Any]] = None,
         assigned_attempt: int = 1,
         tracer: Optional[Tracer] = None,
+        output_sink: Optional[OutputSink] = None,
     ) -> None:
         self.session = session
         self.litellm_client = litellm_client
@@ -77,6 +110,40 @@ class RunExecutor:
         self.checkpointer = checkpointer
         self.assigned_attempt = assigned_attempt
         self.tracer = tracer or get_tracer()
+        self.output_sink = output_sink
+
+    def _superseded(self, run: Run) -> RunExecutionResult:
+        logger.warning(
+            "Execution superseded by newer attempt; aborting stale worker",
+            run_id=str(run.id),
+            current_attempt=run.attempt,
+            assigned_attempt=self.assigned_attempt,
+        )
+        return RunExecutionResult(
+            run_id=run.id,
+            status="superseded",
+            error_code="STALE_WORKER_SUPERSEDED",
+            error_message=f"Superseded by attempt {run.attempt}",
+        )
+
+    async def _rollback(self, run: Run) -> None:
+        """Discard this transaction and reload the run (a rollback expires loaded attributes)."""
+        await self.session.rollback()
+        await self.session.refresh(run)
+
+    async def _fail(self, state_mgr: RunStateManager, run: Run, code: str, message: str) -> RunExecutionResult:
+        """Durably fail the run (fenced by attempt) and return the matching result."""
+        try:
+            await state_mgr.transition_to(
+                "failed",
+                payload={"error_code": code, "error_message": message},
+                expected_attempt=self.assigned_attempt,
+            )
+        except RunSupersededError:
+            await self._rollback(run)
+            return self._superseded(run)
+        await commit_and_publish(self.session)
+        return RunExecutionResult(run_id=run.id, status="failed", error_code=code, error_message=message)
 
     async def execute_run(
         self,
@@ -106,7 +173,7 @@ class RunExecutor:
                     run.langfuse_trace_id = None
             else:
                 run.langfuse_trace_id = None
-        if run.status in ("succeeded", "failed", "cancelled"):
+        if run.status in TERMINAL_STATUSES:
             raise RunTerminalStateError(f"Run {run.id} is already in terminal state '{run.status}'.")
 
         if run.status == "waiting_for_approval":
@@ -126,57 +193,31 @@ class RunExecutor:
         agent_slug = agent_def.slug if agent_def else "agent"
 
         # 4. Handle initial transitions if run is currently queued
-        await self.session.refresh(run, ["status"])
+        await self.session.refresh(run, ["status", "attempt"])
         if run.status in TERMINAL_STATUSES:
             return RunExecutionResult(run_id=run.id, status=run.status)
+        if (run.attempt or 1) > self.assigned_attempt:
+            return self._superseded(run)
 
         is_resuming = run.status == "running"
+        resolved_model: Optional[ResolvedModel] = None
         if run.status in ("queued", "preparing"):
             if run.status == "queued":
-                await state_mgr.transition_to("preparing")
-                await self.session.commit()
+                await state_mgr.transition_to("preparing", expected_attempt=self.assigned_attempt)
+                await commit_and_publish(self.session)
 
             # Validate input payload against agent_version.input_schema
             validator = jsonschema.Draft202012Validator(agent_version.input_schema)
             input_errors = list(validator.iter_errors(run.input_payload))
             if input_errors:
                 err_msg = "; ".join(e.message for e in input_errors)
-                await state_mgr.transition_to(
-                    "failed",
-                    payload={
-                        "error_code": "INPUT_SCHEMA_INVALID",
-                        "error_message": f"Input validation failed: {err_msg}",
-                    },
-                )
-                return RunExecutionResult(
-                    run_id=run.id,
-                    status="failed",
-                    error_code="INPUT_SCHEMA_INVALID",
-                    error_message=f"Input validation failed: {err_msg}",
+                return await self._fail(
+                    state_mgr, run, "INPUT_SCHEMA_INVALID", f"Input validation failed: {err_msg}"
                 )
 
             # Resolve model
-            resolved_model: Optional[ResolvedModel] = None
             if run.resolved_models and "planner" in run.resolved_models:
-                # Pre-resolved snapshot
-                rm_dict = run.resolved_models["planner"]
-                model_id_val = rm_dict.get("model_id") or rm_dict.get("catalog_id")
-                cost_in = rm_dict.get("cost_input_per_1m")
-                cost_out = rm_dict.get("cost_output_per_1m")
-                resolved_model = ResolvedModel(
-                    capability=rm_dict.get("capability", "planner"),
-                    model_id=uuid.UUID(str(model_id_val)) if model_id_val else uuid.uuid4(),
-                    provider=rm_dict["provider"],
-                    name=rm_dict.get("name") or rm_dict.get("model_name", "mock-model"),
-                    gateway_model_key=rm_dict["gateway_model_key"],
-                    capabilities=tuple(rm_dict.get("capabilities", ["reasoning", "json"])),
-                    structured_output=rm_dict.get("structured_output", True),
-                    context_window=rm_dict.get("context_window", 128000),
-                    max_output_tokens=rm_dict.get("max_output_tokens"),
-                    priority=rm_dict.get("priority", 1),
-                    cost_input_per_1m=float(cost_in) if cost_in is not None else None,
-                    cost_output_per_1m=float(cost_out) if cost_out is not None else None,
-                )
+                resolved_model = ResolvedModel.from_snapshot(run.resolved_models["planner"], "planner")
             elif self.model_resolver:
                 reqs = agent_version.model_requirements or {}
                 resolved_model = await self.model_resolver.resolve(self.session, reqs, "planner")
@@ -187,44 +228,21 @@ class RunExecutor:
                     "prompt_hash": agent_version.prompt_hash,
                 }
             else:
-                await state_mgr.transition_to(
-                    "failed",
-                    payload={
-                        "error_code": "MODEL_RESOLUTION_UNAVAILABLE",
-                        "error_message": "No model resolver provided and no pre-resolved model available",
-                    },
-                )
-                return RunExecutionResult(
-                    run_id=run.id,
-                    status="failed",
-                    error_code="MODEL_RESOLUTION_UNAVAILABLE",
-                    error_message="No model resolver provided",
+                return await self._fail(
+                    state_mgr,
+                    run,
+                    "MODEL_RESOLUTION_UNAVAILABLE",
+                    "No model resolver provided and no pre-resolved model available",
                 )
 
             # Transition preparing -> running
-            await state_mgr.transition_to("running")
-            await self.session.commit()
+            run.heartbeat_at = utc_now()
+            await state_mgr.transition_to("running", expected_attempt=self.assigned_attempt)
+            await commit_and_publish(self.session)
         else:
-            # Resuming run: load pre-resolved model from run row
+            # Resuming run: load the pinned model from the run row
             if run.resolved_models and "planner" in run.resolved_models:
-                rm_dict = run.resolved_models["planner"]
-                model_id_val = rm_dict.get("model_id") or rm_dict.get("catalog_id")
-                cost_in = rm_dict.get("cost_input_per_1m")
-                cost_out = rm_dict.get("cost_output_per_1m")
-                resolved_model = ResolvedModel(
-                    capability=rm_dict.get("capability", "planner"),
-                    model_id=uuid.UUID(str(model_id_val)) if model_id_val else uuid.uuid4(),
-                    provider=rm_dict["provider"],
-                    name=rm_dict.get("name") or rm_dict.get("model_name", "mock-model"),
-                    gateway_model_key=rm_dict["gateway_model_key"],
-                    capabilities=tuple(rm_dict.get("capabilities", ["reasoning", "json"])),
-                    structured_output=rm_dict.get("structured_output", True),
-                    context_window=rm_dict.get("context_window", 128000),
-                    max_output_tokens=rm_dict.get("max_output_tokens"),
-                    priority=rm_dict.get("priority", 1),
-                    cost_input_per_1m=float(cost_in) if cost_in is not None else None,
-                    cost_output_per_1m=float(cost_out) if cost_out is not None else None,
-                )
+                resolved_model = ResolvedModel.from_snapshot(run.resolved_models["planner"], "planner")
             else:
                 reqs = agent_version.model_requirements or {}
                 if self.model_resolver:
@@ -232,7 +250,7 @@ class RunExecutor:
                 else:
                     raise ValueError(f"Run {run.id} has no resolved model")
 
-        # 5. Wire step persistence hook (idempotent upsert with attempt fence check)
+        # 5. Wire step persistence hook (attempt-scoped idempotent upsert with attempt fence)
         async def _on_step_completed(
             step_type: str,
             node: str,
@@ -270,15 +288,18 @@ class RunExecutor:
                 )
                 return
 
-            # Upsert RunStep idempotently with actual assigned attempt
-            stmt_step = select(RunStep).where(RunStep.run_id == run.id, RunStep.step_number == step_number)
+            # Upsert RunStep idempotently within this attempt; other attempts keep their own rows.
+            stmt_step = select(RunStep).where(
+                RunStep.run_id == run.id,
+                RunStep.step_number == step_number,
+                RunStep.attempt == self.assigned_attempt,
+            )
             existing_step = (await self.session.execute(stmt_step)).scalar_one_or_none()
             if existing_step:
                 existing_step.output_data = output_data
                 existing_step.tokens_input = cast(Any, tokens_input)
                 existing_step.tokens_output = cast(Any, tokens_output)
                 existing_step.status = "completed"
-                existing_step.attempt = self.assigned_attempt
                 existing_step.finished_at = utc_now()
                 if langfuse_observation_id:
                     existing_step.langfuse_observation_id = langfuse_observation_id
@@ -302,7 +323,7 @@ class RunExecutor:
                 self.session.add(step)
             await self.session.flush()
 
-            # Persist ModelCall record idempotently
+            # Persist ModelCall record idempotently (one per step row, i.e. per attempt)
             stmt_mc = select(ModelCall).where(ModelCall.run_id == run.id, ModelCall.step_id == step.id)
             existing_mc = (await self.session.execute(stmt_mc)).scalar_one_or_none()
             if existing_mc:
@@ -330,23 +351,15 @@ class RunExecutor:
                 self.session.add(model_call)
             await self.session.flush()
 
-            # Reconcile run totals from all persisted model calls for this run
-            totals_stmt = select(
-                func.coalesce(func.sum(ModelCall.tokens_input), 0),
-                func.coalesce(func.sum(ModelCall.tokens_output), 0),
-                func.coalesce(func.sum(ModelCall.cost_usd), 0.0),
-            ).where(ModelCall.run_id == run.id)
-            totals = (await self.session.execute(totals_stmt)).one()
-            run.tokens_input = int(totals[0])
-            run.tokens_output = int(totals[1])
-            run.cost_usd = round(float(totals[2]), 6)
-            await self.session.flush()
+            # Reconcile run totals from every persisted model call (all attempts = real spend)
+            await self._reconcile_totals(run)
+            run.heartbeat_at = utc_now()
 
-            # Publish step.completed event to Redis Pub/Sub
-            try:
-                from qa_agentos.runtime.pubsub import RunEventPayload, publish_run_event
+            from qa_agentos.runtime.pubsub import RunEventPayload
 
-                step_payload = RunEventPayload(
+            queue_run_event(
+                self.session,
+                RunEventPayload(
                     id=str(step.id),
                     version="1.0",
                     event="step.completed",
@@ -365,43 +378,53 @@ class RunExecutor:
                         "input_data": step.input_data,
                         "output_data": step.output_data,
                     },
-                )
-                await publish_run_event(step_payload)
-            except Exception:
-                pass
+                ),
+            )
+            # Durable before LangGraph checkpoints this superstep: history never lags the checkpoint.
+            await commit_and_publish(self.session)
 
         # 6. Build and compile graph
-        dispatcher = ToolDispatcher(self.session)
+        dispatcher = ToolDispatcher(self.session, commit_on_record=True)
         compiled_graph = build_generic_react_graph(
-            checkpointer=self.checkpointer,
+            checkpointer=self._fenced(self.checkpointer, run),
             interrupt_after=interrupt_after,
         )
 
-        config: Dict[str, Any] = {
-            "configurable": {
-                "thread_id": str(run.id),
-                "litellm_client": self.litellm_client,
-                "resolved_model": resolved_model,
-                "tool_dispatcher": dispatcher,
-                "agent_version_entity": agent_version,
-                "on_step_completed": _on_step_completed,
-                "assigned_attempt": self.assigned_attempt,
-                "tracer": self.tracer,
-                "trace_id": run.langfuse_trace_id,
-            }
+        configurable: Dict[str, Any] = {
+            "thread_id": str(run.id),
+            "litellm_client": self.litellm_client,
+            "resolved_model": resolved_model,
+            "tool_dispatcher": dispatcher,
+            "agent_version_entity": agent_version,
+            "on_step_completed": _on_step_completed,
+            "assigned_attempt": self.assigned_attempt,
+            "tracer": self.tracer,
+            "trace_id": run.langfuse_trace_id,
         }
+        runnable_config = RunnableConfig(
+            configurable=configurable,
+            recursion_limit=graph_recursion_limit(agent_version.parameters),
+        )
 
-        runnable_config = RunnableConfig(configurable=config["configurable"])
-
-        # 7. Execute graph (pass None when resuming from checkpoint)
+        # 7. Execute graph (resume from the durable checkpoint when one exists)
         has_checkpoint = False
         if is_resuming and self.checkpointer:
             try:
                 cp = await self.checkpointer.aget(runnable_config)
-                if cp is not None:
-                    has_checkpoint = True
-            except Exception:
+                has_checkpoint = cp is not None
+            except Exception as exc:
+                logger.warning("Checkpoint lookup failed; restarting graph from START", run_id=str(run.id), error=str(exc))
                 has_checkpoint = False
+
+        final_state: Dict[str, Any] = {}
+        graph_finished_before_crash = False
+        if has_checkpoint:
+            snapshot = await compiled_graph.aget_state(runnable_config)
+            if not snapshot.next:
+                # The graph reached END but the worker died before finalizing: reuse the saved state.
+                final_state = dict(snapshot.values)
+                graph_finished_before_crash = True
+                logger.info("Checkpoint already at END; finalizing without re-running nodes", run_id=str(run.id))
 
         graph_input: Optional[AgentState] = None
         if not has_checkpoint:
@@ -425,47 +448,50 @@ class RunExecutor:
                 },
             )
 
-        final_state: Dict[str, Any] = {}
         try:
-            async for state_snapshot in compiled_graph.astream(
-                graph_input, config=runnable_config, stream_mode="values"
-            ):
-                final_state = state_snapshot
-                await self.session.commit()
-                await self.session.refresh(run, ["status", "attempt"])
-                if run.status in TERMINAL_STATUSES:
-                    return RunExecutionResult(
-                        run_id=run.id,
-                        status=run.status,
-                        tokens_input=final_state.get("tokens_input", 0),
-                        tokens_output=final_state.get("tokens_output", 0),
-                        model_calls_count=final_state.get("model_calls_count", 0),
-                        repair_count=final_state.get("repair_count", 0),
-                    )
-                if run.status == "waiting_for_approval":
-                    logger.info("Run transitioned to waiting_for_approval; pausing execution", run_id=str(run.id))
-                    return RunExecutionResult(
-                        run_id=run.id,
-                        status="waiting_for_approval",
-                        interrupted=True,
-                        tokens_input=final_state.get("tokens_input", 0),
-                        tokens_output=final_state.get("tokens_output", 0),
-                        model_calls_count=final_state.get("model_calls_count", 0),
-                        repair_count=final_state.get("repair_count", 0),
-                    )
-                if (run.attempt or 1) > self.assigned_attempt:
-                    logger.warning(
-                        "Execution superseded by newer attempt; aborting stale worker",
-                        run_id=str(run.id),
-                        current_attempt=run.attempt,
-                        assigned_attempt=self.assigned_attempt,
-                    )
-                    return RunExecutionResult(
-                        run_id=run.id,
-                        status="superseded",
-                        error_code="STALE_WORKER_SUPERSEDED",
-                        error_message=f"Superseded by attempt {run.attempt}",
-                    )
+            if not graph_finished_before_crash:
+                async for state_snapshot in compiled_graph.astream(
+                    graph_input, config=runnable_config, stream_mode="values"
+                ):
+                    final_state = state_snapshot
+                    run.heartbeat_at = utc_now()
+                    await commit_and_publish(self.session)
+                    await self.session.refresh(run, ["status", "attempt"])
+                    if run.status in TERMINAL_STATUSES:
+                        return RunExecutionResult(
+                            run_id=run.id,
+                            status=run.status,
+                            tokens_input=final_state.get("tokens_input", 0),
+                            tokens_output=final_state.get("tokens_output", 0),
+                            model_calls_count=final_state.get("model_calls_count", 0),
+                            repair_count=final_state.get("repair_count", 0),
+                        )
+                    if run.status == "waiting_for_approval":
+                        logger.info("Run transitioned to waiting_for_approval; pausing execution", run_id=str(run.id))
+                        return RunExecutionResult(
+                            run_id=run.id,
+                            status="waiting_for_approval",
+                            interrupted=True,
+                            tokens_input=final_state.get("tokens_input", 0),
+                            tokens_output=final_state.get("tokens_output", 0),
+                            model_calls_count=final_state.get("model_calls_count", 0),
+                            repair_count=final_state.get("repair_count", 0),
+                        )
+                    if (run.attempt or 1) > self.assigned_attempt:
+                        return self._superseded(run)
+        except RunSupersededError:
+            # Raised by the checkpoint fence: a newer attempt claimed the run mid-superstep.
+            await self._rollback(run)
+            return self._superseded(run)
+        except GraphRecursionError:
+            # Defence in depth: max_steps normally ends the graph first (see graph builder).
+            await self._rollback(run)
+            return await self._fail(
+                state_mgr,
+                run,
+                "MAX_STEPS_EXCEEDED",
+                "Agent exceeded its execution budget (LangGraph recursion limit reached).",
+            )
         except asyncio.CancelledError:
             logger.info("Run execution cancelled during graph streaming", run_id=str(run.id))
             raise
@@ -477,7 +503,6 @@ class RunExecutor:
 
         # 8. Check if graph was interrupted
         if interrupt_after:
-            # Check if execution stopped before reaching a terminal status
             status = final_state.get("status")
             if status == "running":
                 return RunExecutionResult(
@@ -512,80 +537,43 @@ class RunExecutor:
                 repair_count=final_state.get("repair_count", 0),
             )
         if (run.attempt or 1) > self.assigned_attempt:
-            logger.warning(
-                "Cannot finalize terminal state; superseded by newer attempt",
-                run_id=str(run.id),
-                current_attempt=run.attempt,
-                assigned_attempt=self.assigned_attempt,
-            )
-            return RunExecutionResult(
-                run_id=run.id,
-                status="superseded",
-                error_code="STALE_WORKER_SUPERSEDED",
-                error_message=f"Superseded by attempt {run.attempt}",
-            )
-        # Reconcile run totals from all persisted model calls for this run
-        totals_stmt = select(
-            func.coalesce(func.sum(ModelCall.tokens_input), 0),
-            func.coalesce(func.sum(ModelCall.tokens_output), 0),
-            func.coalesce(func.sum(ModelCall.cost_usd), 0.0),
-        ).where(ModelCall.run_id == run.id)
-        totals = (await self.session.execute(totals_stmt)).one()
-        run.tokens_input = int(totals[0])
-        run.tokens_output = int(totals[1])
-        run.cost_usd = round(float(totals[2]), 6)
+            return self._superseded(run)
 
-        try:
-            self.tracer.flush()
-        except Exception:
-            pass
+        await self._reconcile_totals(run)
         status = final_state.get("status")
 
-        if status == "succeeded":
-            final_out = final_state.get("final_output")
-            run.output_payload = final_out
-            await state_mgr.transition_to(
-                "succeeded",
-                payload={"summary": final_out.get("summary") if final_out else ""},
-            )
-            if final_out:
-                try:
-                    import json
+        try:
+            if status == "succeeded":
+                final_out = final_state.get("final_output")
+                run.output_payload = final_out
+                success_payload: Dict[str, Any] = {"summary": final_out.get("summary") if final_out else ""}
+                if final_out and self.output_sink:
+                    try:
+                        await self.output_sink(self.session, run, final_out)
+                        success_payload["artifact_status"] = "stored"
+                    except Exception as art_err:
+                        # The output itself is persisted on the run row; the artifact is a derived
+                        # copy. Record the failure in the run history instead of hiding it.
+                        logger.error(
+                            "Failed to store run output artifact", error=str(art_err), run_id=str(run.id)
+                        )
+                        success_payload["artifact_status"] = "failed"
+                        success_payload["artifact_error"] = type(art_err).__name__
+                await state_mgr.transition_to(
+                    "succeeded", payload=success_payload, expected_attempt=self.assigned_attempt
+                )
+                await commit_and_publish(self.session)
+                return RunExecutionResult(
+                    run_id=run.id,
+                    status="succeeded",
+                    output_payload=final_out,
+                    tokens_input=run.tokens_input,
+                    tokens_output=run.tokens_output,
+                    cost_usd=run.cost_usd,
+                    model_calls_count=final_state.get("model_calls_count", 0),
+                    repair_count=final_state.get("repair_count", 0),
+                )
 
-                    from qa_agentos.modules.artifacts.service import ArtifactsService
-                    from qa_agentos.modules.auth.schemas import Identity
-                    identity = Identity(
-                        user_id=None,
-                        project_id=run.project_id,
-                        role="system",
-                        scopes=["*"],
-                        is_api_key=False,
-                    )
-                    raw_bytes = json.dumps(final_out, indent=2).encode("utf-8")
-                    await ArtifactsService.create_artifact(
-                        db=self.session,
-                        identity=identity,
-                        project_id=run.project_id,
-                        name=f"testcases-{str(run.id)[:8]}.json",
-                        artifact_type="json",
-                        data=raw_bytes,
-                        run_id=run.id,
-                        content_type="application/json",
-                    )
-                except Exception as art_err:
-                    logger.warning("Failed to auto-generate run artifact", error=str(art_err), run_id=str(run.id))
-            await self.session.commit()
-            return RunExecutionResult(
-                run_id=run.id,
-                status="succeeded",
-                output_payload=final_out,
-                tokens_input=run.tokens_input,
-                tokens_output=run.tokens_output,
-                cost_usd=run.cost_usd,
-                model_calls_count=final_state.get("model_calls_count", 0),
-                repair_count=final_state.get("repair_count", 0),
-            )
-        else:
             err_code = final_state.get("error_code") or "RUN_FAILED"
             err_msg = final_state.get("error_message") or "Agent execution failed"
             err_details = final_state.get("error_details") or {}
@@ -596,8 +584,9 @@ class RunExecutor:
                     "error_message": err_msg,
                     "error_details": err_details,
                 },
+                expected_attempt=self.assigned_attempt,
             )
-            await self.session.commit()
+            await commit_and_publish(self.session)
             return RunExecutionResult(
                 run_id=run.id,
                 status="failed",
@@ -609,3 +598,46 @@ class RunExecutor:
                 model_calls_count=final_state.get("model_calls_count", 0),
                 repair_count=final_state.get("repair_count", 0),
             )
+        except RunSupersededError:
+            await self._rollback(run)
+            return self._superseded(run)
+
+    def _fenced(
+        self, checkpointer: Optional[BaseCheckpointSaver[Any]], run: Run
+    ) -> Optional[BaseCheckpointSaver[Any]]:
+        """Fence checkpoint writes by attempt (PostgreSQL deployments).
+
+        Uses a separate pooled connection, not ``self.session``: LangGraph persists checkpoints
+        in the background, concurrently with node code that uses the session.
+        """
+        bind = self.session.bind
+        if checkpointer is None or not isinstance(bind, AsyncEngine) or bind.dialect.name != "postgresql":
+            return checkpointer
+        engine: AsyncEngine = bind
+        run_id = run.id
+        assigned = self.assigned_attempt
+
+        async def fence() -> None:
+            async with engine.connect() as conn:
+                current = (await conn.execute(select(Run.attempt).where(Run.id == run_id))).scalar_one_or_none()
+            if current is not None and (current or 1) > assigned:
+                logger.warning(
+                    "Refusing checkpoint write from superseded attempt",
+                    run_id=str(run_id),
+                    current_attempt=current,
+                    assigned_attempt=assigned,
+                )
+                raise RunSupersededError(f"Run {run_id} is owned by attempt {current}; attempt {assigned} is stale.")
+
+        return fenced_checkpointer(checkpointer, fence)
+
+    async def _reconcile_totals(self, run: Run) -> None:
+        totals_stmt = select(
+            func.coalesce(func.sum(ModelCall.tokens_input), 0),
+            func.coalesce(func.sum(ModelCall.tokens_output), 0),
+            func.coalesce(func.sum(ModelCall.cost_usd), 0.0),
+        ).where(ModelCall.run_id == run.id)
+        totals = (await self.session.execute(totals_stmt)).one()
+        run.tokens_input = int(totals[0])
+        run.tokens_output = int(totals[1])
+        run.cost_usd = round(float(totals[2]), 6)

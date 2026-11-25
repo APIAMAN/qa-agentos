@@ -1,0 +1,8 @@
+2026-11-05 02:00:01.004 UTC [4411] LOG:  checkpoint starting: time
+2026-11-05 02:10:33.871 UTC [5120] ERROR:  deadlock detected
+2026-11-05 02:10:33.871 UTC [5120] DETAIL:  Process 5120 waits for ShareLock on transaction 99102; blocked by process 5133.
+2026-11-05 02:10:33.871 UTC [5120] STATEMENT:  UPDATE ledger_entries SET balance = balance - 25.00 WHERE account_id = 3302
+2026-11-05 02:10:33.900 UTC [app] ERROR [settlement] batch aborted: transfer 7781 rolled back, retry scheduled
+2026-11-05 02:12:01.338 UTC [5188] ERROR:  deadlock detected
+2026-11-05 02:12:01.338 UTC [5188] DETAIL:  Process 5188 waits for ShareLock on transaction 99140; blocked by process 5190.
+2026-11-05 02:12:01.410 UTC [app] ERROR [settlement] batch aborted: transfer 7790 rolled back, retry scheduled

@@ -1,0 +1,4 @@
+2026-11-11 09:00:00,100 INFO  [boot] service starting
+2026-11-11 09:00:00,300 WARN  [boot] config key 'cache.ttl' is deprecated; use 'cache.ttl_seconds'
+2026-11-11 09:00:00,302 WARN  [boot] library requests-retry 1.2 is deprecated and will be removed in 2.0
+2026-11-11 09:00:01,010 INFO  [boot] service ready in 910ms

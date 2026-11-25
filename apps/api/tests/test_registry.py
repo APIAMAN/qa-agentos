@@ -120,16 +120,17 @@ async def test_initial_sync_and_idempotency_postgres(pg_session: AsyncSession):
     """Verify registry synchronization on PostgreSQL and strict idempotency on repeated runs."""
     root = find_registry_root()
 
-    # 1. Initial sync
+    # 1. Initial sync: everything the YAML catalog defines is created, nothing more.
+    catalog = load_registry_catalog(root)
     result1 = await sync_registries(pg_session, registry_root=root)
-    assert result1.models_created == 3
-    assert result1.tools_created == 1
-    assert result1.agents_created == 1
-    assert result1.versions_created == 1
+    assert result1.models_created == len(catalog.models)
+    assert result1.tools_created == len(catalog.tools)
+    assert result1.agents_created == len(catalog.agents)
+    assert result1.versions_created == len(catalog.agents)
 
     # Verify models exist in DB
     models = (await pg_session.execute(select(ModelCatalog))).scalars().all()
-    assert len(models) == 3
+    assert len(models) == len(catalog.models)
     model_providers = {m.provider for m in models}
     assert "nvidia_nim" in model_providers
     assert "gemini" in model_providers
@@ -137,17 +138,17 @@ async def test_initial_sync_and_idempotency_postgres(pg_session: AsyncSession):
 
     # Verify tools exist in DB
     tools = (await pg_session.execute(select(ToolDefinition))).scalars().all()
-    assert len(tools) == 1
-    assert tools[0].name == "util.echo"
-    assert tools[0].idempotent is True
+    assert {t.name for t in tools} == {t.name for t in catalog.tools}
+    assert {"util.echo", "log.parse"} <= {t.name for t in tools}
+    assert all(t.idempotent is True for t in tools)
 
     # Verify agent and version in DB
     agents = (await pg_session.execute(select(AgentDefinition))).scalars().all()
-    assert len(agents) == 1
-    assert agents[0].slug == "test-case-generator"
+    assert {a.slug for a in agents} == {a.slug for a in catalog.agents}
+    assert {"test-case-generator", "bug-analyzer"} <= {a.slug for a in agents}
 
     versions = (await pg_session.execute(select(AgentVersion))).scalars().all()
-    assert len(versions) == 1
+    assert len(versions) == len(catalog.agents)
     assert versions[0].version == "1.0.0"
     assert versions[0].status == "active"
     assert versions[0].activated_at is not None

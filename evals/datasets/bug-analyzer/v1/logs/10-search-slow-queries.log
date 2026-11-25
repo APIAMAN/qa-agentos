@@ -1,0 +1,6 @@
+2026-11-10 10:00:00,001 INFO  [search] query q="red shoes" took 180ms
+2026-11-10 10:00:03,450 WARN  [search] slow query q="red shoes size 42" took 2840ms (threshold 1000ms)
+2026-11-10 10:00:07,912 WARN  [search] slow query q="blue jacket" took 3105ms (threshold 1000ms)
+2026-11-10 10:00:12,300 ERROR [search] query timed out after 5000ms index=products_v3
+2026-11-10 10:00:19,880 ERROR [search] query timed out after 5000ms index=products_v3
+2026-11-10 10:00:20,002 INFO  [search] p95 latency 4120ms over last 60s

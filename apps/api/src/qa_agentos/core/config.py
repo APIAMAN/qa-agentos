@@ -61,6 +61,36 @@ class Settings(BaseSettings):
     # Durable LangGraph checkpoints for the Hatchet worker (PostgreSQL, schema "langgraph").
     WORKER_CHECKPOINTER_ENABLED: bool = True
 
+    # --- M3 embeddings + bug duplicate detection (docs/m3/BUG_ANALYZER.md) ---
+    # Off by default: no embedding provider is called (and nothing is spent) until D1 is decided
+    # and a deployment opts in. Duplicate detection then uses exact error signatures only.
+    # D1: Google Gemini gemini-embedding-001 at 1536 dimensions, task type SEMANTIC_SIMILARITY,
+    # served by the LiteLLM alias below (dimension and task type are set there, Gemini-native).
+    # Vectors are stored with their model identity and dimension; changing the model, dimension or
+    # task type needs a re-embedding job, never an in-place reinterpretation.
+    EMBEDDINGS_ENABLED: bool = False
+    EMBEDDING_PROVIDER: str = "gateway"  # "gateway" (LiteLLM alias below) | "fake" (tests/evals only)
+    EMBEDDING_GATEWAY_MODEL_KEY: str = "embedder"
+    EMBEDDING_MODEL_IDENTITY: str = "gemini/gemini-embedding-001:SEMANTIC_SIMILARITY"
+    EMBEDDING_DIMENSIONS: int = 1536
+    # Send OpenAI-style "dimensions". Keep false for Gemini via LiteLLM 1.52 (it rejects the parameter;
+    # the alias sets outputDimensionality instead).
+    EMBEDDING_REQUEST_DIMENSIONS: bool = False
+    # Provider-specific embedding mode sent as "input_type" (e.g. NVIDIA retrieval models:
+    # "passage"/"query"). Unset = not sent. Must stay unset for Gemini: its task type is configured
+    # on the LiteLLM alias (taskType), and an unknown "input_type" field would be forwarded to Google.
+    EMBEDDING_INPUT_TYPE: Optional[str] = None
+    EMBEDDING_TIMEOUT_SECONDS: float = 15.0
+    # Required (> 0) when EMBEDDINGS_ENABLED with the gateway provider; take it from the provider's
+    # price list (gemini-embedding-001 standard tier, verified 2026-11-25: 0.15 USD per 1M input tokens).
+    # Not defaulted on purpose. Embedding spend is recorded per call in model_calls, not in runs.cost_usd.
+    EMBEDDING_COST_PER_1M_TOKENS: float = 0.0
+    # Cosine similarity at or above which a structurally compatible bug joins an existing cluster.
+    # Initial calibration for Gemini (2026-11-25 benchmark): duplicates 1.000 / 0.9887, highest
+    # non-duplicate 0.9291, so 0.95 separates them even before the structural guard. Re-check with
+    # evals/embeddings_benchmark.py when the model, dimension or task type changes.
+    DUPLICATE_SIMILARITY_THRESHOLD: float = 0.95
+
     @property
     def run_stale_after_seconds(self) -> int:
         if self.RUN_STALE_AFTER_SECONDS is not None:
@@ -98,6 +128,12 @@ class Settings(BaseSettings):
                     "RUN_DISPATCHER is configured as 'hatchet', but HATCHET_CLIENT_TOKEN is not set or empty. "
                     "A valid Hatchet client token is required for durable task execution."
                 )
+        if self.EMBEDDINGS_ENABLED and self.EMBEDDING_PROVIDER == "gateway" and not self.EMBEDDING_COST_PER_1M_TOKENS > 0:
+            raise ValueError(
+                "EMBEDDINGS_ENABLED is true with EMBEDDING_PROVIDER 'gateway', but EMBEDDING_COST_PER_1M_TOKENS "
+                "is not a positive number. Set it from the embedding provider's price list so embedding spend "
+                "is recorded (no default price is assumed)."
+            )
         return self
 
     model_config = SettingsConfigDict(

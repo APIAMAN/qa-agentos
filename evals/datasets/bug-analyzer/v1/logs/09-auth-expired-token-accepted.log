@@ -1,0 +1,5 @@
+2026-11-08T07:45:00Z INFO  [auth] token check user=u-77 exp=2026-11-01T00:00:00Z now=2026-11-08T07:45:00Z
+2026-11-08T07:45:00Z ERROR [auth] SECURITY: expired token accepted for admin route /admin/users; verify_exp disabled in config
+2026-11-08T07:45:00Z INFO  [auth] Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1LTc3IiwiZXhwIjoxNzYxOTU1MjAwfQ.c2lnbmF0dXJlLXJlZGFjdGVk
+2026-11-08T07:46:12Z ERROR [auth] SECURITY: expired token accepted for admin route /admin/roles; verify_exp disabled in config
+2026-11-08T07:46:12Z INFO  [db] connecting postgres://svc_auth:SuperSecretPw1@db.internal:5432/auth

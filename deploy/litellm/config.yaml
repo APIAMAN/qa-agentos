@@ -8,6 +8,21 @@ model_list:
     litellm_params:
       model: gemini/gemini-2.5-flash
       api_key: os.environ/GEMINI_API_KEY
+  # Embeddings for bug duplicate detection (D1: Google Gemini). Only called when the app sets
+  # EMBEDDINGS_ENABLED=true. LiteLLM 1.52 has no Gemini mapping for OpenAI's "dimensions"/"input_type",
+  # so the Gemini-native fields below are forwarded as-is into each embedContent request.
+  - model_name: embedder
+    litellm_params:
+      model: gemini/gemini-embedding-001
+      api_key: os.environ/GEMINI_API_KEY
+      outputDimensionality: 1536
+      taskType: SEMANTIC_SIMILARITY
+  # G-Eval judge for local agent evaluations only (decision D2; evals/run.py, EVAL_JUDGE_MODEL_KEY=judge).
+  # Separate from the agent and embedding models. Never called by the app or by GitHub Actions.
+  - model_name: judge
+    litellm_params:
+      model: gemini/gemini-3.5-flash-lite
+      api_key: os.environ/GEMINI_API_KEY
   - model_name: mock-json
     litellm_params:
       model: gpt-3.5-turbo

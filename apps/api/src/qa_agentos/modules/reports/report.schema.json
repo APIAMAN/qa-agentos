@@ -1,0 +1,680 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qa-agentos.local/schemas/run-report/1.1.json",
+  "title": "RunReport",
+  "description": "Schema-validated report of a single agent run (any agent, any status).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "generated_at",
+    "run",
+    "error",
+    "attempts",
+    "status_timeline",
+    "steps",
+    "model_usage",
+    "approvals",
+    "artifacts"
+  ],
+  "$defs": {
+    "timestamp": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "uuid": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "calls",
+        "failed_calls",
+        "tokens_input",
+        "tokens_output",
+        "cost_usd",
+        "latency_ms"
+      ],
+      "properties": {
+        "calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tokens_input": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tokens_output": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cost_usd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "latency_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  },
+  "properties": {
+    "schema_version": {
+      "enum": [
+        "1.0",
+        "1.1"
+      ]
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "project_id",
+        "status",
+        "verdict",
+        "is_final",
+        "agent",
+        "attempt_count",
+        "replayed_from",
+        "queued_at",
+        "started_at",
+        "finished_at",
+        "duration_ms",
+        "input",
+        "output"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "project_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "status": {
+          "type": "string"
+        },
+        "verdict": {
+          "enum": [
+            "succeeded",
+            "failed",
+            "cancelled",
+            "incomplete"
+          ]
+        },
+        "is_final": {
+          "type": "boolean"
+        },
+        "agent": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "agent_version_id",
+            "slug",
+            "name",
+            "version",
+            "prompt_hash"
+          ],
+          "properties": {
+            "agent_version_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "slug": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "version": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "prompt_hash": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "attempt_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "replayed_from": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "queued_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "started_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "finished_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "duration_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "input": {
+          "type": "object"
+        },
+        "output": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      }
+    },
+    "error": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "message": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "details": {
+              "type": [
+                "object",
+                "null"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "attempts": {
+      "type": "array",
+      "description": "Retry/resume claims after the initial attempt, oldest first.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "attempt",
+          "kind",
+          "at"
+        ],
+        "properties": {
+          "attempt": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "kind": {
+            "type": "string"
+          },
+          "at": {
+            "$ref": "#/$defs/timestamp"
+          }
+        }
+      }
+    },
+    "status_timeline": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "seq",
+          "from_status",
+          "to_status",
+          "event",
+          "at",
+          "payload"
+        ],
+        "properties": {
+          "seq": {
+            "type": "integer"
+          },
+          "from_status": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "to_status": {
+            "type": "string"
+          },
+          "event": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "at": {
+            "$ref": "#/$defs/timestamp"
+          },
+          "payload": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "steps": {
+      "type": "array",
+      "description": "Every recorded step of every attempt, ordered by (step_number, attempt).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "step_number",
+          "attempt",
+          "node",
+          "step_type",
+          "status",
+          "latency_ms",
+          "tokens_input",
+          "tokens_output",
+          "started_at",
+          "finished_at",
+          "error"
+        ],
+        "properties": {
+          "step_number": {
+            "type": "integer"
+          },
+          "attempt": {
+            "type": "integer"
+          },
+          "node": {
+            "type": "string"
+          },
+          "step_type": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "latency_ms": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "tokens_input": {
+            "type": "integer"
+          },
+          "tokens_output": {
+            "type": "integer"
+          },
+          "started_at": {
+            "$ref": "#/$defs/timestamp"
+          },
+          "finished_at": {
+            "$ref": "#/$defs/timestamp"
+          },
+          "error": {
+            "type": [
+              "object",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "model_usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "totals",
+        "by_model"
+      ],
+      "properties": {
+        "totals": {
+          "$ref": "#/$defs/usage"
+        },
+        "by_model": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "capability",
+              "gateway_model_key",
+              "model_id",
+              "usage"
+            ],
+            "properties": {
+              "capability": {
+                "type": "string"
+              },
+              "gateway_model_key": {
+                "type": "string"
+              },
+              "model_id": {
+                "oneOf": [
+                  {
+                    "$ref": "#/$defs/uuid"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "usage": {
+                "$ref": "#/$defs/usage"
+              }
+            }
+          }
+        }
+      }
+    },
+    "approvals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "action_type",
+          "prompt_text",
+          "status",
+          "decision_by",
+          "decision_note",
+          "created_at",
+          "decided_at"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/uuid"
+          },
+          "action_type": {
+            "type": "string"
+          },
+          "prompt_text": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "decision_by": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "decision_note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "$ref": "#/$defs/timestamp"
+          },
+          "decided_at": {
+            "$ref": "#/$defs/timestamp"
+          }
+        }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "artifact_type",
+          "content_hash",
+          "file_size_bytes",
+          "created_at",
+          "href"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "artifact_type": {
+            "type": "string"
+          },
+          "content_hash": {
+            "type": "string"
+          },
+          "file_size_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "created_at": {
+            "$ref": "#/$defs/timestamp"
+          },
+          "href": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "bug": {
+      "description": "Bug Analyzer result for this run, when the agent produced one (schema 1.1+).",
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "title",
+            "severity",
+            "category",
+            "summary",
+            "root_cause",
+            "signature",
+            "evidence",
+            "repro_steps",
+            "affected_component",
+            "confidence",
+            "grounded",
+            "is_duplicate",
+            "match",
+            "cluster",
+            "related_bugs"
+          ],
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "title": {
+              "type": "string"
+            },
+            "severity": {
+              "enum": [
+                "critical",
+                "high",
+                "medium",
+                "low"
+              ]
+            },
+            "category": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            },
+            "root_cause": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "signature": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "repro_steps": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "affected_component": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "confidence": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "grounded": {
+              "type": "boolean"
+            },
+            "is_duplicate": {
+              "type": "boolean"
+            },
+            "match": {
+              "type": "object"
+            },
+            "cluster": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "title",
+                "severity",
+                "category",
+                "report_count",
+                "first_seen_at",
+                "last_seen_at"
+              ],
+              "properties": {
+                "id": {
+                  "$ref": "#/$defs/uuid"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "severity": {
+                  "type": "string"
+                },
+                "category": {
+                  "type": "string"
+                },
+                "report_count": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "first_seen_at": {
+                  "$ref": "#/$defs/timestamp"
+                },
+                "last_seen_at": {
+                  "$ref": "#/$defs/timestamp"
+                }
+              }
+            },
+            "related_bugs": {
+              "type": "array",
+              "maxItems": 10,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "run_id",
+                  "title",
+                  "severity",
+                  "created_at",
+                  "report_url"
+                ],
+                "properties": {
+                  "id": {
+                    "$ref": "#/$defs/uuid"
+                  },
+                  "run_id": {
+                    "$ref": "#/$defs/uuid"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "severity": {
+                    "type": "string"
+                  },
+                  "created_at": {
+                    "$ref": "#/$defs/timestamp"
+                  },
+                  "report_url": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

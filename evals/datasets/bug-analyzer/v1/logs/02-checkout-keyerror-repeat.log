@@ -1,0 +1,11 @@
+2026-11-09 18:40:11,902 INFO  [checkout] start order_id=0b9e44d1-2222-4f3a-8c1b-000000000777 user=u-2210
+2026-11-09 18:40:12,015 ERROR [checkout] order placement failed order_id=0b9e44d1-2222-4f3a-8c1b-000000000777
+Traceback (most recent call last):
+  File "/app/checkout/api.py", line 57, in post_order
+    return service.place_order(cart)
+  File "/app/checkout/service.py", line 93, in place_order
+    total = cart["total"]
+  File "/app/checkout/cart.py", line 12, in __getitem__
+    return self.items[key]
+KeyError: 'total'
+2026-11-09 18:40:12,017 INFO  [http] POST /api/orders 500 118ms

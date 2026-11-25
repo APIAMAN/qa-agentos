@@ -8,6 +8,8 @@ dependencies = []
 
 [tool.uv.workspace]
 members = ["apps/api"]
+# evals/ is its own uv project with its own lockfile (keeps eval tooling out of uv.lock).
+exclude = ["evals"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

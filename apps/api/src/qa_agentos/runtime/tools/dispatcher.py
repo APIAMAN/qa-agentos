@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from structlog import get_logger
 
 from qa_agentos.models.domain import AgentVersion, RunStep, ToolDefinition
+from qa_agentos.runtime.tools.builtin.logparse import log_parse
 from qa_agentos.runtime.tools.builtin.util import echo
 from qa_agentos.runtime.tools.errors import (
     ToolError,
@@ -45,6 +46,8 @@ ToolCallable = Callable[[Mapping[str, Any], Any], Awaitable[dict[str, Any]]]
 APPROVED_BUILTIN_TOOLS: dict[str, ToolCallable] = {
     "qa_agentos.tools.builtin.util:echo": echo,
     "util.echo": echo,
+    # Inline-text variant; the worker injects the artifact-capable one (modules/bugs/tools.py).
+    "qa_agentos.tools.builtin.logparse:log_parse": log_parse,
 }
 
 

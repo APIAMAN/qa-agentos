@@ -169,13 +169,16 @@ class MinioStorageClient:
             logger.warning("Failed to generate presigned URL", error=str(exc), minio_key=minio_key)
             return f"/v1/artifacts/download?key={minio_key}"
 
-    def get_object_data(self, minio_key: str) -> Tuple[bytes, str]:
-        """Retrieve raw object bytes and content_type from MinIO."""
+    def get_object_data(self, minio_key: str, max_bytes: Optional[int] = None) -> Tuple[bytes, str]:
+        """Retrieve raw object bytes and content_type from MinIO (at most ``max_bytes`` if given)."""
         client = self.get_client()
         try:
             stat = client.stat_object(self.bucket, minio_key)
             content_type = stat.content_type or "application/octet-stream"
-            response = client.get_object(self.bucket, minio_key)
+            if max_bytes is not None:
+                response = client.get_object(self.bucket, minio_key, offset=0, length=max_bytes)
+            else:
+                response = client.get_object(self.bucket, minio_key)
             data = response.read()
             response.close()
             response.release_conn()

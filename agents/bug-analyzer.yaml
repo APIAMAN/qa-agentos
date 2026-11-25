@@ -1,0 +1,119 @@
+slug: bug-analyzer
+name: Bug Report & Log Analyzer
+description: >
+  Analyzes a log bundle through the deterministic log.parse tool and produces a structured,
+  evidence-backed bug report: severity, category, summary, likely root cause, evidence and the
+  primary error signature used for duplicate detection.
+kind: generic_react
+version: 1.0.0
+status: active
+prompt_file: prompts/bug-analyzer/1.0.0.md
+
+parameters:
+  temperature: 0.0
+  max_repairs: 2
+  max_steps: 4
+  # Post-run processing of a succeeded run's output (see modules/runs/output.py).
+  output_sinks:
+    - bug_store
+
+permissions:
+  - artifact:read
+  # Every synced tool also requires its ToolDefinition.required_permission (DB default "member";
+  # tools.yaml cannot set it yet), so tool-using agents must hold it.
+  - member
+
+allowed_tools:
+  - log.parse@1.0.0
+
+model_requirements:
+  planner:
+    capabilities:
+      - reasoning
+      - json
+    min_context_window: 32000
+    structured_output: true
+
+input_schema:
+  $schema: "https://json-schema.org/draft/2020-12/schema"
+  title: BugAnalyzerInput
+  type: object
+  required:
+    - log_artifact_id
+  properties:
+    log_artifact_id:
+      type: string
+      format: uuid
+      description: Id of the uploaded log bundle artifact (type log, text or json) in this project.
+    context:
+      type: string
+      maxLength: 4000
+      description: Optional context (what was being tested, recent changes). Do not paste raw logs here.
+    environment:
+      type: string
+      maxLength: 100
+      description: Environment the logs come from (e.g. staging, production).
+  additionalProperties: false
+
+output_schema:
+  $schema: "https://json-schema.org/draft/2020-12/schema"
+  title: BugAnalyzerOutput
+  type: object
+  required:
+    - title
+    - severity
+    - category
+    - summary
+    - root_cause
+    - primary_signature
+    - evidence
+    - repro_steps
+  properties:
+    title:
+      type: string
+      minLength: 5
+      maxLength: 200
+    severity:
+      type: string
+      enum: [critical, high, medium, low]
+    category:
+      type: string
+      enum: [crash, data_integrity, performance, availability, security, functional, configuration, integration, other]
+    summary:
+      type: string
+      minLength: 10
+      maxLength: 2000
+    root_cause:
+      type: ["string", "null"]
+      maxLength: 2000
+    primary_signature:
+      type: ["string", "null"]
+      pattern: "^sig_[0-9a-f]{16}$"
+    evidence:
+      type: array
+      maxItems: 10
+      items:
+        type: object
+        required: [signature, detail]
+        properties:
+          signature:
+            type: ["string", "null"]
+            pattern: "^sig_[0-9a-f]{16}$"
+          detail:
+            type: string
+            maxLength: 1000
+        additionalProperties: false
+    repro_steps:
+      type: array
+      maxItems: 15
+      items:
+        type: string
+        maxLength: 500
+    affected_component:
+      type: ["string", "null"]
+      maxLength: 200
+    confidence:
+      type: number
+      minimum: 0
+      maximum: 1
+  additionalProperties: false

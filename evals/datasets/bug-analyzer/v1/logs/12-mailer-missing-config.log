@@ -1,0 +1,4 @@
+2026-11-13 12:00:00,000 INFO  [notify] starting notification worker
+2026-11-13 12:00:00,015 ERROR [notify] missing required setting SMTP_HOST; email notifications disabled
+2026-11-13 12:05:00,040 ERROR [notify] dropped 14 order confirmation emails: email notifications disabled
+2026-11-13 12:10:00,051 ERROR [notify] dropped 9 order confirmation emails: email notifications disabled

@@ -61,3 +61,6 @@ postgres_data/
 # Graphify generated cache
 graphify-out/cache/
 graphify-out/.graphify_partition_cache.json
+
+# Evaluation run outputs (CI uploads them as workflow artifacts)
+evals/results/

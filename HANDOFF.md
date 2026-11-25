@@ -1,3 +1,51 @@
+# HANDOFF: M3 (Bug Analyzer, reports, eval gates)
+
+Branch `feat/m3-reliability`, **uncommitted**. Plan, status and evidence: [docs/m3/PLAN.md](docs/m3/PLAN.md).
+Design: [docs/m3/BUG_ANALYZER.md](docs/m3/BUG_ANALYZER.md); evals and CI: [docs/m3/EVALS.md](docs/m3/EVALS.md).
+The M3-R reliability handoff follows below and is unchanged.
+
+## M3: what changed
+
+| Area | Files |
+|---|---|
+| Reports | `modules/reports/` (schema 1.1, builder, HTML, export, versions), migration `0004_m3_reports`, `main.py` (+2 lines) |
+| Log parser tool | `runtime/tools/builtin/logparse.py`, `tools.yaml` (`log.parse`), `runtime/tools/dispatcher.py` (+mapping), `runtime/storage.py` (optional `max_bytes` range read) |
+| Tool injection | `runtime/executor.py` (optional `tool_implementations`; sink may return extra event fields), `modules/bugs/tools.py`, `workers/main.py`, `modules/runs/dispatcher.py` |
+| Agent | `agents/bug-analyzer.yaml`, `prompts/bug-analyzer/1.0.0.md` |
+| Embeddings | `runtime/gateway/embeddings.py`, `runtime/gateway/client.py` (`embeddings()`), `core/config.py` (EMBEDDING_*, DUPLICATE_SIMILARITY_THRESHOLD), `deploy/litellm/config.yaml` (`embedder` alias) |
+| Bugs | `modules/bugs/{matching,service}.py`, `models/domain.py` (`Report`, `BugCluster`, `BugReport`), migrations `0005_m3_bugs` + `0006_m3_bug_embedding_index`, `modules/runs/output.py` (default output sink), `modules/artifacts/service.py` (optional artifact name) |
+| Console | `apps/web/app/runs/[id]/report/page.tsx` (new), `apps/web/app/runs/[id]/page.tsx` (Report link) |
+| Evals | `evals/` (own `pyproject.toml` + `uv.lock`), root `pyproject.toml` (`exclude = ["evals"]`), `.gitignore` (`evals/results/`) |
+| CI | `.github/workflows/agent-evals.yml` |
+| Tests | `test_reports_api.py`, `test_report_export.py`, `test_bug_analyzer.py`, `test_bug_store.py`, `test_bug_report_integration.py`, `test_registry.py` (counts follow the catalog), `evals/tests/test_harness.py` |
+
+## M3: how to verify
+
+Same services and environment as M3-R below (HANDOFF env line, worker stopped during pytest), plus:
+
+```bash
+uv run --locked pytest apps/api/tests -q                      # backend incl. M3
+uv sync --project evals --locked && (cd evals && uv run --locked pytest -q)
+uv run --project evals python evals/run.py --mode reference   # exit 0
+pnpm install --frozen-lockfile && pnpm --filter web typecheck && pnpm --filter web lint && pnpm --filter web build
+```
+
+## M3: still open
+
+0. Embeddings are disabled by default (`EMBEDDINGS_ENABLED=false`): duplicate detection is exact-signature only.
+   Enabling requires `EMBEDDING_COST_PER_1M_TOKENS` > 0 (Gemini: 0.15). Security follow-up (L2): make
+   `ToolDefinition.required_permission` a registry field.
+1. D1 done: Gemini `gemini-embedding-001` (1536 dims, SEMANTIC_SIMILARITY) via the LiteLLM `embedder` alias,
+   verified live; `DUPLICATE_SIMILARITY_THRESHOLD=0.95`; HNSW index migration `0006_m3_bug_embedding_index`.
+   Enabling embeddings in a deployment stays an operator decision (`EMBEDDINGS_ENABLED=true`, cost 0.15).
+2. Evals: GitHub Actions is deterministic only (D3, zero budget). AC1/AC4 run locally with
+   `evals/run.py --mode live|ac4 --allow-live` (docs/m3/EVALS.md §5). Blocked: `gemini-2.5-flash`
+   (agent) and `gemini-2.5-flash-lite` (judge) are 404 for this account; approve replacements
+   (`gemini-3.8-flash`, `gemini-3.5-flash-lite` reachable) with verified prices.
+3. Review and commit. Suggested split: reports (T1-T3), parser/agent/datasets (T4-T6), embeddings/bugs (T7-T9), evals/CI (T10-T11), docs.
+
+---
+
 # HANDOFF — M3 Reliability (for Antigravity)
 
 Branch: `feat/m3-reliability` (from `chore/m1-integration-infra` @ `a215c26`). **Uncommitted** —

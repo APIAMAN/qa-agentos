@@ -49,13 +49,16 @@ from qa_agentos.runtime.gateway.resolution import ModelResolver, ResolvedModel
 from qa_agentos.runtime.graph.builder import build_generic_react_graph
 from qa_agentos.runtime.graph.checkpointer import fenced_checkpointer
 from qa_agentos.runtime.graph.state import AgentState
-from qa_agentos.runtime.tools.dispatcher import ToolDispatcher
+from qa_agentos.runtime.tools.dispatcher import ToolCallable, ToolDispatcher
 
 logger = get_logger(__name__)
 
 #: Persists a succeeded run's output somewhere durable (e.g. an artifact). It must only add
-#: rows to the given session, never commit, and raise on failure.
-OutputSink = Callable[[AsyncSession, Run, Dict[str, Any]], Awaitable[None]]
+#: rows to the given session and never commit. It may return a dict of extra fields recorded on
+#: the run's ``succeeded`` event. Failure handling: if it raises, the run still succeeds and the
+#: event records ``artifact_status: failed``; the default sink (modules/runs/output.py) never
+#: raises and reports each step's outcome in the returned dict instead.
+OutputSink = Callable[[AsyncSession, Run, Dict[str, Any]], Awaitable[Optional[Dict[str, Any]]]]
 
 DEFAULT_MAX_STEPS = 10
 DEFAULT_MAX_REPAIRS = 2
@@ -103,6 +106,7 @@ class RunExecutor:
         assigned_attempt: int = 1,
         tracer: Optional[Tracer] = None,
         output_sink: Optional[OutputSink] = None,
+        tool_implementations: Optional[Dict[str, ToolCallable]] = None,
     ) -> None:
         self.session = session
         self.litellm_client = litellm_client
@@ -111,6 +115,8 @@ class RunExecutor:
         self.assigned_attempt = assigned_attempt
         self.tracer = tracer or get_tracer()
         self.output_sink = output_sink
+        #: Extra/overriding tool implementations (e.g. storage-aware ones injected by the worker).
+        self.tool_implementations = tool_implementations
 
     def _superseded(self, run: Run) -> RunExecutionResult:
         logger.warning(
@@ -384,7 +390,9 @@ class RunExecutor:
             await commit_and_publish(self.session)
 
         # 6. Build and compile graph
-        dispatcher = ToolDispatcher(self.session, commit_on_record=True)
+        dispatcher = ToolDispatcher(
+            self.session, custom_implementations=self.tool_implementations, commit_on_record=True
+        )
         compiled_graph = build_generic_react_graph(
             checkpointer=self._fenced(self.checkpointer, run),
             interrupt_after=interrupt_after,
@@ -549,8 +557,10 @@ class RunExecutor:
                 success_payload: Dict[str, Any] = {"summary": final_out.get("summary") if final_out else ""}
                 if final_out and self.output_sink:
                     try:
-                        await self.output_sink(self.session, run, final_out)
+                        sink_extra = await self.output_sink(self.session, run, final_out)
                         success_payload["artifact_status"] = "stored"
+                        if sink_extra:
+                            success_payload.update(sink_extra)
                     except Exception as art_err:
                         # The output itself is persisted on the run row; the artifact is a derived
                         # copy. Record the failure in the run history instead of hiding it.

@@ -35,6 +35,7 @@ class AgentState(TypedDict, total=False):
     raw_response: Optional[str]
     parsed_output: Optional[Dict[str, Any]]
     pending_tool_calls: List[Dict[str, Any]]
+    tool_results_count: int  # tool results appended so far (absent in older checkpoints = 0)
     step_count: int
     repair_count: int
     max_repairs: int

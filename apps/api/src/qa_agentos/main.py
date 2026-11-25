@@ -12,6 +12,7 @@ from qa_agentos.modules.approvals.router import router as approvals_router
 from qa_agentos.modules.artifacts.router import router as artifacts_router
 from qa_agentos.modules.auth.router import router as auth_router
 from qa_agentos.modules.projects.router import router as projects_router
+from qa_agentos.modules.reports.router import router as reports_router
 from qa_agentos.modules.runs.dispatcher import get_dispatcher, set_dispatcher
 from qa_agentos.modules.runs.router import router as runs_router
 
@@ -58,6 +59,7 @@ app.include_router(auth_router, prefix=settings.API_V1_STR)
 app.include_router(projects_router, prefix=settings.API_V1_STR)
 app.include_router(agents_router, prefix=settings.API_V1_STR)
 app.include_router(runs_router, prefix=settings.API_V1_STR)
+app.include_router(reports_router, prefix=settings.API_V1_STR)
 app.include_router(approvals_router, prefix=settings.API_V1_STR + "/approvals", tags=["Approvals"])
 app.include_router(artifacts_router, prefix=settings.API_V1_STR + "/artifacts", tags=["Artifacts"])
 

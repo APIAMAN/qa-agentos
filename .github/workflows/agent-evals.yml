@@ -1,0 +1,89 @@
+name: Agent Evals
+
+# Deterministic quality gates for agents (docs/m3/EVALS.md). No model is ever called from GitHub
+# Actions: no secrets, no gateway, no paid API usage. Real-model evaluation (AC1/AC4) is a local,
+# operator-run command (evals/run.py --mode live|ac4 --allow-live), refused under CI by the runner.
+on:
+  pull_request:
+    paths:
+      - "agents/**"
+      - "prompts/**"
+      - "tools.yaml"
+      - "models.yaml"
+      - "evals/**"
+      - "deploy/litellm/**"
+      - "apps/api/src/qa_agentos/runtime/tools/**"
+      - "apps/api/src/qa_agentos/runtime/gateway/**"
+      - "apps/api/src/qa_agentos/runtime/graph/**"
+      - "apps/api/src/qa_agentos/modules/bugs/**"
+      - ".github/workflows/agent-evals.yml"
+  push:
+    branches: [main]
+    paths:
+      - "agents/**"
+      - "prompts/**"
+      - "tools.yaml"
+      - "models.yaml"
+      - "evals/**"
+      - "deploy/litellm/**"
+      - "apps/api/src/qa_agentos/runtime/tools/**"
+      - "apps/api/src/qa_agentos/runtime/gateway/**"
+      - "apps/api/src/qa_agentos/runtime/graph/**"
+      - "apps/api/src/qa_agentos/modules/bugs/**"
+      - ".github/workflows/agent-evals.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-evals-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deterministic:
+    name: Agent evals (deterministic, no credentials)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Belt and braces: nothing in this job may reach a model or embedding provider.
+      EMBEDDINGS_ENABLED: "false"
+      EVAL_JUDGE_MODEL_KEY: ""
+      LITELLM_MASTER_KEY: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install eval project (separate lockfile; DeepEval never enters uv.lock)
+        run: uv sync --project evals --locked --python 3.12
+
+      - name: Harness self-tests (gate mechanics incl. weakened-output gates; scripted model/judge)
+        working-directory: evals
+        run: uv run --locked pytest -q
+
+      - name: Reference gate (parser + dataset + scoring; fails on drift)
+        run: uv run --project evals --locked python evals/run.py --mode reference --out evals/results/reference.json
+
+      - name: Live evaluation is refused under CI (no model call possible)
+        run: |
+          set +e
+          uv run --project evals --locked python evals/run.py --mode live --allow-live --out evals/results/live-refused.json
+          code=$?
+          set -e
+          if [ "$code" -ne 2 ]; then echo "::error::live evaluation was not refused under CI (exit $code)"; exit 1; fi
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-evals-reference
+          path: evals/results/
+          if-no-files-found: warn

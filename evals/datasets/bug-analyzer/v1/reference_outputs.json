@@ -1,0 +1,272 @@
+{
+  "_note": "Hand-written reference outputs for harness self-tests. NOT model outputs; never report them as an evaluation of a model.",
+  "dataset": "bug-analyzer/v1",
+  "outputs": {
+    "01-checkout-keyerror": {
+      "title": "Checkout order placement fails with KeyError 'total' in place_order",
+      "severity": "high",
+      "category": "functional",
+      "summary": "Checkout order placement fails with KeyError 'total' (HTTP 500).",
+      "root_cause": "place_order reads cart['total'] but the cart object has no 'total' entry, so Cart.__getitem__ raises KeyError.",
+      "primary_signature": "sig_78639419da314aa0",
+      "evidence": [
+        {
+          "signature": "sig_78639419da314aa0",
+          "detail": "KeyError 'total' raised from Cart.__getitem__ via place_order (2 occurrences)."
+        },
+        {
+          "signature": "sig_5f5a3d0221cbb4ef",
+          "detail": "Each failure is logged as 'order placement failed'."
+        }
+      ],
+      "repro_steps": [
+        "POST /api/orders with a cart that has items",
+        "Observe HTTP 500 and KeyError 'total'"
+      ],
+      "affected_component": "checkout/service.py",
+      "confidence": 0.9
+    },
+    "02-checkout-keyerror-repeat": {
+      "title": "Checkout order placement fails with KeyError 'total' in place_order",
+      "severity": "high",
+      "category": "functional",
+      "summary": "Same checkout KeyError a week later: exact duplicate of 01.",
+      "root_cause": "cart['total'] is missing when place_order computes the total.",
+      "primary_signature": "sig_78639419da314aa0",
+      "evidence": [
+        {
+          "signature": "sig_78639419da314aa0",
+          "detail": "Same KeyError 'total' traceback through place_order."
+        }
+      ],
+      "repro_steps": [
+        "POST /api/orders",
+        "Observe HTTP 500"
+      ],
+      "affected_component": "checkout/service.py",
+      "confidence": 0.9
+    },
+    "03-order-npe": {
+      "title": "Order lookup throws NullPointerException in OrderService.enrich",
+      "severity": "high",
+      "category": "functional",
+      "summary": "Order lookup throws NullPointerException in OrderService.enrich (HTTP 500).",
+      "root_cause": "OrderService.enrich dereferences a null order (getCustomer on null) when the order is not loaded.",
+      "primary_signature": "sig_dd2c7bf3d83e9dea",
+      "evidence": [
+        {
+          "signature": "sig_dd2c7bf3d83e9dea",
+          "detail": "NullPointerException in OrderService.enrich from OrderService.load (2 requests)."
+        }
+      ],
+      "repro_steps": [
+        "GET /orders/4471",
+        "Observe HTTP 500"
+      ],
+      "affected_component": "com.shop.OrderService",
+      "confidence": 0.9
+    },
+    "04-order-npe-variant": {
+      "title": "Order lookup throws NullPointerException in OrderService.enrich",
+      "severity": "high",
+      "category": "functional",
+      "summary": "Same NPE in OrderService.enrich with a different JVM message: near duplicate of 03.",
+      "root_cause": "OrderRepository.find returns null and OrderService.enrich calls getCustomer on it.",
+      "primary_signature": "sig_42ea8dfaaabf4af6",
+      "evidence": [
+        {
+          "signature": "sig_42ea8dfaaabf4af6",
+          "detail": "NPE: return value of OrderRepository.find is null in OrderService.enrich."
+        }
+      ],
+      "repro_steps": [
+        "GET /orders/9120",
+        "Observe HTTP 500"
+      ],
+      "affected_component": "com.shop.OrderService",
+      "confidence": 0.9
+    },
+    "05-cart-render-typeerror": {
+      "title": "Cart page render fails: cannot read 'quantity' of undefined in CartLine",
+      "severity": "medium",
+      "category": "functional",
+      "summary": "Cart line render TypeError; UI falls back to an empty cart.",
+      "root_cause": "CartLine receives an undefined line item and reads its quantity.",
+      "primary_signature": "sig_f7270fcf35580567",
+      "evidence": [
+        {
+          "signature": "sig_f7270fcf35580567",
+          "detail": "TypeError in CartLine during renderCart; UI falls back to an empty cart."
+        }
+      ],
+      "repro_steps": [
+        "Open /cart for a session whose cart has a missing line item"
+      ],
+      "affected_component": "web/components/CartLine.js",
+      "confidence": 0.9
+    },
+    "06-ledger-deadlock": {
+      "title": "Settlement transfers rolled back by PostgreSQL deadlocks on ledger_entries",
+      "severity": "high",
+      "category": "data_integrity",
+      "summary": "Settlement transfers rolled back by PostgreSQL deadlocks.",
+      "root_cause": "Concurrent settlement updates on ledger_entries lock rows in different orders and deadlock.",
+      "primary_signature": "sig_8b1f7554088997c0",
+      "evidence": [
+        {
+          "signature": "sig_8b1f7554088997c0",
+          "detail": "PostgreSQL reports 'deadlock detected' twice."
+        },
+        {
+          "signature": "sig_30e2e2b3c7517ac2",
+          "detail": "Settlement batch aborted; transfers rolled back and retried."
+        }
+      ],
+      "repro_steps": [],
+      "affected_component": "settlement",
+      "confidence": 0.9
+    },
+    "07-payment-go-panic": {
+      "title": "Payment service crash loop: nil pointer dereference in gateway Client.Charge",
+      "severity": "critical",
+      "category": "crash",
+      "summary": "Payment service nil-pointer panic in a crash loop; charges not processed.",
+      "root_cause": "charges.Process calls Charge on a nil gateway client.",
+      "primary_signature": "sig_0f97be74e344d289",
+      "evidence": [
+        {
+          "signature": "sig_0f97be74e344d289",
+          "detail": "Go panic (nil pointer dereference) in gateway.(*Client).Charge; service in CrashLoopBackOff."
+        }
+      ],
+      "repro_steps": [
+        "Process any charge after payment-svc start"
+      ],
+      "affected_component": "payment/internal/gateway",
+      "confidence": 0.9
+    },
+    "08-api-gateway-502": {
+      "title": "Search requests fail with 502: upstream search cluster timing out",
+      "severity": "high",
+      "category": "availability",
+      "summary": "Search returns 502: upstream search cluster timing out.",
+      "root_cause": "The upstream search service times out, so the gateway returns 502 for POST /api/search.",
+      "primary_signature": "sig_f4e098e0c7a3c948",
+      "evidence": [
+        {
+          "signature": "sig_f4e098e0c7a3c948",
+          "detail": "HTTP 502 on POST /api/search (3 requests)."
+        }
+      ],
+      "repro_steps": [
+        "POST /api/search",
+        "Observe HTTP 502"
+      ],
+      "affected_component": "api gateway / search",
+      "confidence": 0.9
+    },
+    "09-auth-expired-token-accepted": {
+      "title": "Expired tokens accepted on admin routes (verify_exp disabled)",
+      "severity": "critical",
+      "category": "security",
+      "summary": "Expired tokens accepted on admin routes (verify_exp disabled).",
+      "root_cause": "Token expiry verification is disabled in configuration, so expired tokens authorize admin routes.",
+      "primary_signature": "sig_15fe4a2749cd2ced",
+      "evidence": [
+        {
+          "signature": "sig_15fe4a2749cd2ced",
+          "detail": "Expired token accepted for /admin/users."
+        },
+        {
+          "signature": "sig_481d0e14d3c7eb23",
+          "detail": "Expired token accepted for /admin/roles."
+        }
+      ],
+      "repro_steps": [
+        "Call /admin/users with an expired token",
+        "Observe the request is authorized"
+      ],
+      "affected_component": "auth",
+      "confidence": 0.9
+    },
+    "10-search-slow-queries": {
+      "title": "Search queries time out after 5000ms on products_v3",
+      "severity": "medium",
+      "category": "performance",
+      "summary": "Slow search queries and timeouts on products_v3.",
+      "root_cause": "Queries on index products_v3 are slow and exceed the 5000ms timeout.",
+      "primary_signature": "sig_cf7d283a5990d07f",
+      "evidence": [
+        {
+          "signature": "sig_cf7d283a5990d07f",
+          "detail": "Two query timeouts after 5000ms; slow-query warnings precede them."
+        }
+      ],
+      "repro_steps": [],
+      "affected_component": "search",
+      "confidence": 0.9
+    },
+    "11-deprecation-warnings": {
+      "title": "Deprecation warnings at startup (cache.ttl, requests-retry)",
+      "severity": "low",
+      "category": "configuration",
+      "summary": "Only deprecation warnings; no errors.",
+      "root_cause": null,
+      "primary_signature": null,
+      "evidence": [],
+      "repro_steps": [],
+      "affected_component": "boot",
+      "confidence": 0.5
+    },
+    "12-mailer-missing-config": {
+      "title": "Order confirmation emails dropped: SMTP_HOST setting missing",
+      "severity": "medium",
+      "category": "configuration",
+      "summary": "Missing SMTP_HOST disables order confirmation emails.",
+      "root_cause": "SMTP_HOST is not configured, so the notification worker disables email.",
+      "primary_signature": "sig_abb3387a9eb8d597",
+      "evidence": [
+        {
+          "signature": "sig_01f515f36f6afb28",
+          "detail": "Missing required setting SMTP_HOST disables email."
+        },
+        {
+          "signature": "sig_abb3387a9eb8d597",
+          "detail": "Order confirmation emails dropped (2 batches)."
+        }
+      ],
+      "repro_steps": [],
+      "affected_component": "notify",
+      "confidence": 0.9
+    },
+    "13-empty": {
+      "title": "Empty log bundle: no errors to analyze",
+      "severity": "low",
+      "category": "other",
+      "summary": "Empty log bundle (edge case: no signatures).",
+      "root_cause": null,
+      "primary_signature": null,
+      "evidence": [],
+      "repro_steps": [],
+      "affected_component": null,
+      "confidence": 0.5
+    },
+    "14-pricing-typeerror-jsonl": {
+      "title": "Pricing quote fails: cannot read 'quantity' of undefined in applyDiscount",
+      "severity": "medium",
+      "category": "functional",
+      "summary": "JSON-lines pricing TypeError; same message as 05 but different code path.",
+      "root_cause": "applyDiscount reads quantity from an undefined item.",
+      "primary_signature": "sig_71ffcc4b1647d749",
+      "evidence": [
+        {
+          "signature": "sig_71ffcc4b1647d749",
+          "detail": "TypeError in applyDiscount via quote (2 occurrences)."
+        }
+      ],
+      "repro_steps": [],
+      "affected_component": "pricing/discounts.js",
+      "confidence": 0.9
+    }
+  }
+}

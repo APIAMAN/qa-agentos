@@ -2,7 +2,20 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, text
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -336,3 +349,128 @@ class Artifact(Base):
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     file_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
+class Report(Base):
+    """An exported, immutable version of a run report (JSON + HTML stored as artifacts).
+
+    ``content_hash`` is the SHA-256 of the canonical report JSON without ``generated_at``; it is
+    unique per run, so re-exporting unchanged evidence (or a retried export request) returns the
+    existing version instead of creating a new one.
+    """
+
+    __tablename__ = "reports"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    schema_version: Mapped[str] = mapped_column(String(16), nullable=False)
+    verdict: Mapped[str] = mapped_column(String(32), nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    json_artifact_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True
+    )
+    html_artifact_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True
+    )
+    created_by: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    api_key_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("api_keys.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("run_id", "version", name="uq_reports_run_id_version"),
+        UniqueConstraint("run_id", "content_hash", name="uq_reports_run_id_content_hash"),
+    )
+
+
+class BugCluster(Base):
+    """A group of bug reports judged to be the same underlying bug (within one project)."""
+
+    __tablename__ = "bug_clusters"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    category: Mapped[str] = mapped_column(String(32), nullable=False)
+    #: Signature of the report that founded the cluster. Unique per project, so two concurrent
+    #: first sightings of the same new signature cannot create two clusters.
+    founding_signature: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    report_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+    __table_args__ = (
+        Index(
+            "uq_bug_clusters_project_founding_signature",
+            "project_id",
+            "founding_signature",
+            unique=True,
+            postgresql_where=text("founding_signature IS NOT NULL"),
+        ),
+    )
+
+
+class BugReport(Base):
+    """One Bug Analyzer result (one per run), linked to the cluster it belongs to."""
+
+    __tablename__ = "bug_reports"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("runs.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    cluster_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("bug_clusters.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    category: Mapped[str] = mapped_column(String(32), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    root_cause: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: Primary error signature, kept only if this run's log.parse produced it (grounded).
+    signature: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    exception_type: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    top_frames: Mapped[List[str]] = mapped_column(JSONB, default=list, nullable=False)
+    evidence: Mapped[List[Dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
+    repro_steps: Mapped[List[str]] = mapped_column(JSONB, default=list, nullable=False)
+    affected_component: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    grounded: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_duplicate: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    #: Why this report joined (or founded) its cluster: method, similarity, threshold, reasons.
+    match: Mapped[Dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    #: Unit-length embedding. The dimension is not fixed in the schema (see embedding_* columns).
+    embedding: Mapped[Optional[List[float]]] = mapped_column(Vector(), nullable=True)
+    embedding_model: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    embedding_dimensions: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+    __table_args__ = (
+        Index("ix_bug_reports_project_signature", "project_id", "signature"),
+        Index("ix_bug_reports_project_embedding_model", "project_id", "embedding_model", "embedding_dimensions"),
+        # Partial HNSW expression index for 1536-dim vectors (migration 0006; PostgreSQL + pgvector only).
+        # shortcut: autogenerate compares this index by name only (expression form cannot be compared);
+        # test_1536_dim_index_exists_and_neighbour_search_uses_it checks the real definition.
+        Index(
+            "ix_bug_reports_embedding_1536_hnsw",
+            text("(embedding::vector(1536)) vector_cosine_ops"),
+            postgresql_using="hnsw",
+            postgresql_where=text("embedding_dimensions = 1536"),
+        ).ddl_if(dialect="postgresql"),
+    )

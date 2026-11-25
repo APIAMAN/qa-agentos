@@ -1,0 +1,8 @@
+2026-11-12T08:20:05.004Z INFO  [http-nio-8080-exec-1] c.s.OrderController - GET /orders/9120
+2026-11-12T08:20:05.051Z ERROR [http-nio-8080-exec-1] c.s.OrderController - request failed
+java.lang.NullPointerException: Cannot invoke "com.shop.Order.getCustomer()" because the return value of "com.shop.OrderRepository.find(long)" is null
+	at com.shop.OrderService.enrich(OrderService.java:121)
+	at com.shop.OrderService.load(OrderService.java:74)
+	at com.shop.OrderController.get(OrderController.java:41)
+	at org.springframework.web.servlet.FrameworkServlet.service(FrameworkServlet.java:897)
+2026-11-12T08:20:05.052Z INFO  [http-nio-8080-exec-1] c.s.AccessLog - GET /orders/9120 500 48ms

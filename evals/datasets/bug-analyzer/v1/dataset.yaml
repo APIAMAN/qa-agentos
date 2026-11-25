@@ -1,0 +1,168 @@
+# Golden dataset v1 for the Bug Analyzer (see evals/README.md).
+# expected.signatures / primary_signature are frozen log.parse outputs; a parser change that
+# alters them must bump PARSER_VERSION and this dataset version.
+dataset: bug-analyzer
+version: v1
+parser_version: 1.0.0
+provenance: Synthetic logs written for QA AgentOS; no customer data. Credentials, tokens and emails in fixtures
+  are fake and exist to test redaction.
+labeling: Severity and category labeled by hand using the rubric in prompts/bug-analyzer/1.0.0.md.
+cases:
+- id: 01-checkout-keyerror
+  log: logs/01-checkout-keyerror.log
+  note: Checkout order placement fails with KeyError 'total' (HTTP 500).
+  expected:
+    severity: high
+    category: functional
+    primary_signature: sig_78639419da314aa0
+    signatures:
+    - sig_78639419da314aa0
+    - sig_5f5a3d0221cbb4ef
+    error_count: 4
+- id: 02-checkout-keyerror-repeat
+  log: logs/02-checkout-keyerror-repeat.log
+  note: 'Same checkout KeyError a week later: exact duplicate of 01.'
+  expected:
+    severity: high
+    category: functional
+    primary_signature: sig_78639419da314aa0
+    signatures:
+    - sig_78639419da314aa0
+    - sig_5f5a3d0221cbb4ef
+    error_count: 2
+- id: 03-order-npe
+  log: logs/03-order-npe.log
+  note: Order lookup throws NullPointerException in OrderService.enrich (HTTP 500).
+  expected:
+    severity: high
+    category: functional
+    primary_signature: sig_dd2c7bf3d83e9dea
+    signatures:
+    - sig_dd2c7bf3d83e9dea
+    - sig_fee68352f377bd38
+    error_count: 4
+- id: 04-order-npe-variant
+  log: logs/04-order-npe-variant.log
+  note: 'Same NPE in OrderService.enrich with a different JVM message: near duplicate of 03.'
+  expected:
+    severity: high
+    category: functional
+    primary_signature: sig_42ea8dfaaabf4af6
+    signatures:
+    - sig_42ea8dfaaabf4af6
+    - sig_fee68352f377bd38
+    error_count: 2
+- id: 05-cart-render-typeerror
+  log: logs/05-cart-render-typeerror.log
+  note: Cart line render TypeError; UI falls back to an empty cart.
+  expected:
+    severity: medium
+    category: functional
+    primary_signature: sig_f7270fcf35580567
+    signatures:
+    - sig_f7270fcf35580567
+    - sig_c6924d0d0c21357c
+    error_count: 2
+- id: 06-ledger-deadlock
+  log: logs/06-ledger-deadlock.log
+  note: Settlement transfers rolled back by PostgreSQL deadlocks.
+  expected:
+    severity: high
+    category: data_integrity
+    primary_signature: sig_8b1f7554088997c0
+    signatures:
+    - sig_8b1f7554088997c0
+    - sig_30e2e2b3c7517ac2
+    error_count: 4
+- id: 07-payment-go-panic
+  log: logs/07-payment-go-panic.log
+  note: Payment service nil-pointer panic in a crash loop; charges not processed.
+  expected:
+    severity: critical
+    category: crash
+    primary_signature: sig_0f97be74e344d289
+    signatures:
+    - sig_0f97be74e344d289
+    error_count: 1
+- id: 08-api-gateway-502
+  log: logs/08-api-gateway-502.log
+  note: 'Search returns 502: upstream search cluster timing out.'
+  expected:
+    severity: high
+    category: availability
+    primary_signature: sig_f4e098e0c7a3c948
+    signatures:
+    - sig_f4e098e0c7a3c948
+    error_count: 3
+- id: 09-auth-expired-token-accepted
+  log: logs/09-auth-expired-token-accepted.log
+  note: Expired tokens accepted on admin routes (verify_exp disabled).
+  expected:
+    severity: critical
+    category: security
+    primary_signature: sig_15fe4a2749cd2ced
+    signatures:
+    - sig_15fe4a2749cd2ced
+    - sig_481d0e14d3c7eb23
+    error_count: 2
+- id: 10-search-slow-queries
+  log: logs/10-search-slow-queries.log
+  note: Slow search queries and timeouts on products_v3.
+  expected:
+    severity: medium
+    category: performance
+    primary_signature: sig_cf7d283a5990d07f
+    signatures:
+    - sig_cf7d283a5990d07f
+    error_count: 2
+- id: 11-deprecation-warnings
+  log: logs/11-deprecation-warnings.log
+  note: Only deprecation warnings; no errors.
+  expected:
+    severity: low
+    category: configuration
+    primary_signature: null
+    signatures: []
+    error_count: 0
+- id: 12-mailer-missing-config
+  log: logs/12-mailer-missing-config.log
+  note: Missing SMTP_HOST disables order confirmation emails.
+  expected:
+    severity: medium
+    category: configuration
+    primary_signature: sig_abb3387a9eb8d597
+    signatures:
+    - sig_abb3387a9eb8d597
+    - sig_01f515f36f6afb28
+    error_count: 3
+- id: 13-empty
+  log: logs/13-empty.log
+  note: 'Empty log bundle (edge case: no signatures).'
+  expected:
+    severity: low
+    category: other
+    primary_signature: null
+    signatures: []
+    error_count: 0
+- id: 14-pricing-typeerror-jsonl
+  log: logs/14-pricing-typeerror-jsonl.log
+  note: JSON-lines pricing TypeError; same message as 05 but different code path.
+  expected:
+    severity: medium
+    category: functional
+    primary_signature: sig_71ffcc4b1647d749
+    signatures:
+    - sig_71ffcc4b1647d749
+    error_count: 2
+duplicates:
+- case: 02-checkout-keyerror-repeat
+  of: 01-checkout-keyerror
+  expected_method: exact_signature
+- case: 04-order-npe-variant
+  of: 03-order-npe
+  expected_method: embedding
+distinct:
+- a: 05-cart-render-typeerror
+  b: 14-pricing-typeerror-jsonl
+- a: 01-checkout-keyerror
+  b: 03-order-npe

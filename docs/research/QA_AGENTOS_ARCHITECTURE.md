@@ -1057,6 +1057,10 @@ Each criterion is testable; "works on my machine" is not a criterion.
 3. Reports render with embedded artifacts and a stable, shareable URL; JSON export validates against the report schema.
 4. A PR that degrades the analyzer's G-Eval faithfulness score below threshold fails the `agent-evals` CI job.
 
+> **Implementation status (2026-11):** implemented as described in `docs/m3/BUG_ANALYZER.md` and
+> `docs/m3/EVALS.md`; progress and evidence per criterion in `docs/m3/PLAN.md`. Real-model verification
+> of criteria 1 and 4 awaits decisions D1-D3 (embedding model, judge model, CI credentials).
+
 **M4 — API Testing + workflows v1**
 1. Uploading an OpenAPI 3.1 spec produces a normalized operation catalog; a broken spec returns typed validation errors, not a 500.
 2. Schemathesis fuzz run against `examples/buggy-shop` finds the planted 500-on-valid-input bug and attaches the minimal repro request/response.

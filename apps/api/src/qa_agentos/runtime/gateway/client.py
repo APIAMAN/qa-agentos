@@ -10,9 +10,10 @@ the ``Authorization`` header, and never included in errors, logs, or ``repr``.
 """
 
 import json
+import re
 from dataclasses import dataclass
 from types import TracebackType
-from typing import Any, Dict, Mapping, Optional, Sequence, Type
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Type
 
 import httpx
 
@@ -29,9 +30,36 @@ from qa_agentos.runtime.gateway.errors import (
     ModelUpstreamError,
 )
 from qa_agentos.runtime.gateway.resolution import ResolvedModel
+from qa_agentos.runtime.tools.builtin.logparse import redact_secrets
 
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
+EMBEDDINGS_PATH = "/v1/embeddings"
 _ALLOWED_ROLES = frozenset({"system", "user", "assistant"})
+_GEMINI_PROVIDERS = frozenset({"gemini", "vertex_ai"})
+_MAX_UPSTREAM_MESSAGE = 500
+# Google API keys in the newer "AQ." format (redact_secrets covers the older "AIza" form).
+_GOOGLE_AQ_KEY = re.compile(r"\bAQ\.[A-Za-z0-9_-]{16,}")
+
+
+def gemini_compatible_schema(schema: Any) -> Any:
+    """Copy of ``schema`` with nullable unions ``type: [X, "null"]`` as Gemini's ``type: X, nullable: true``.
+
+    LiteLLM 1.52 forwards JSON Schema type lists to Gemini's response_schema unchanged, which Gemini
+    rejects (HTTP 400 INVALID_ARGUMENT). The input is never mutated and the result is idempotent.
+    """
+    if isinstance(schema, list):
+        return [gemini_compatible_schema(s) for s in schema]
+    if not isinstance(schema, Mapping):
+        return schema
+    out = {k: gemini_compatible_schema(v) for k, v in schema.items()}
+    types = out.get("type")
+    if isinstance(types, list) and "null" in types:
+        rest = [t for t in types if t != "null"]
+        # shortcut: only single-type unions are converted; ["string", "number", "null"] is left as-is.
+        if len(rest) == 1:
+            out["type"] = rest[0]
+            out["nullable"] = True
+    return out
 
 
 @dataclass(frozen=True)
@@ -187,7 +215,11 @@ class LiteLLMClient:
                     "type": "json_schema",
                     "json_schema": {
                         "name": structured_output.name,
-                        "schema": dict(structured_output.schema),
+                        "schema": (
+                            gemini_compatible_schema(structured_output.schema)
+                            if model.provider in _GEMINI_PROVIDERS
+                            else dict(structured_output.schema)
+                        ),
                         "strict": structured_output.strict,
                     },
                 }
@@ -265,11 +297,74 @@ class LiteLLMClient:
         self._raise_for_status(response, log_ctx)
         return self._parse_completion(response, model, mode, log_ctx)
 
+    async def embeddings(
+        self,
+        gateway_model_key: str,
+        inputs: Sequence[str],
+        *,
+        dimensions: Optional[int] = None,
+        input_type: Optional[str] = None,
+        timeout_seconds: Optional[float] = None,
+    ) -> Tuple[List[List[float]], Optional[int]]:
+        """``POST /v1/embeddings`` through LiteLLM. Returns ``(vectors, prompt_tokens)``.
+
+        Same typed errors as ``chat_completion`` (timeout, unavailable, rate limited, upstream,
+        auth, rejected, invalid response).
+        """
+        payload: Dict[str, Any] = {"model": gateway_model_key, "input": list(inputs)}
+        if dimensions is not None:
+            payload["dimensions"] = dimensions
+        if input_type:
+            payload["input_type"] = input_type  # provider-specific; only sent when configured
+        log_ctx: Dict[str, Any] = {"gateway_model_key": gateway_model_key, "capability": "embedding"}
+        try:
+            response = await self._http.post(
+                f"{self._base_url}{EMBEDDINGS_PATH}",
+                json=payload,
+                headers={"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"},
+                timeout=timeout_seconds if timeout_seconds is not None else self._timeout,
+            )
+        except httpx.TimeoutException:
+            logger.warning("model_gateway_timeout", **log_ctx)
+            raise ModelGatewayTimeoutError("Timed out waiting for the model gateway.", details=dict(log_ctx)) from None
+        except httpx.TransportError as exc:
+            logger.warning("model_gateway_unreachable", error_type=type(exc).__name__, **log_ctx)
+            raise ModelGatewayUnavailableError(
+                "Could not connect to the model gateway.", details={**log_ctx, "error_type": type(exc).__name__}
+            ) from None
+        self._raise_for_status(response, log_ctx)
+
+        def invalid(reason: str) -> ModelResponseInvalidError:
+            logger.warning("model_gateway_invalid_response", reason=reason, **log_ctx)
+            return ModelResponseInvalidError(
+                "Model gateway returned an invalid embeddings response.", details={**log_ctx, "reason": reason}
+            )
+
+        try:
+            body = json.loads(response.content)
+        except (ValueError, UnicodeDecodeError):
+            raise invalid("malformed_json") from None
+        data = body.get("data") if isinstance(body, dict) else None
+        if not isinstance(data, list) or len(data) != len(inputs):
+            raise invalid("data_count_mismatch")
+        ordered = sorted(data, key=lambda d: d.get("index", 0) if isinstance(d, dict) else 0)
+        vectors: List[List[float]] = []
+        for item in ordered:
+            vec = item.get("embedding") if isinstance(item, dict) else None
+            if not isinstance(vec, list) or not vec or not all(isinstance(x, (int, float)) for x in vec):
+                raise invalid("bad_embedding")
+            vectors.append([float(x) for x in vec])
+        if len({len(v) for v in vectors}) != 1:
+            raise invalid("inconsistent_dimensions")
+        usage = body.get("usage") if isinstance(body, dict) else None
+        tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+        return vectors, tokens if isinstance(tokens, int) else None
+
     # ----------------------------------------------------------------- response
 
     @staticmethod
     def _upstream_error_code(response: httpx.Response) -> Optional[str]:
-        """Extract only a short error code/type token; never the free-text message."""
+        """Extract only a short error code/type token."""
         try:
             body = response.json()
         except ValueError:
@@ -282,6 +377,21 @@ class LiteLLMClient:
                     return str(val)
         return None
 
+    def _upstream_error_message(self, response: httpx.Response) -> Optional[str]:
+        """The provider's error message (e.g. Google's field violations), redacted and truncated."""
+        try:
+            body = response.json()
+        except ValueError:
+            return None
+        err = body.get("error") if isinstance(body, dict) else None
+        msg = err.get("message") if isinstance(err, dict) else None
+        if not isinstance(msg, str) or not msg:
+            return None
+        if self._api_key:
+            msg = msg.replace(self._api_key, "[REDACTED]")
+        msg = _GOOGLE_AQ_KEY.sub("[REDACTED_KEY]", redact_secrets(msg))
+        return msg[:_MAX_UPSTREAM_MESSAGE]
+
     def _raise_for_status(self, response: httpx.Response, log_ctx: Dict[str, Any]) -> None:
         status_code = response.status_code
         if 200 <= status_code < 300:
@@ -290,6 +400,9 @@ class LiteLLMClient:
         upstream_code = self._upstream_error_code(response)
         if upstream_code is not None:
             details["upstream_code"] = upstream_code
+        upstream_message = self._upstream_error_message(response)
+        if upstream_message is not None:
+            details["upstream_message"] = upstream_message
         logger.warning("model_gateway_http_error", **details)
 
         if status_code == 429:

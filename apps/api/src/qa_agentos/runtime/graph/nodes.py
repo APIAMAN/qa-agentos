@@ -121,6 +121,20 @@ async def prepare_node(state: AgentState, config: RunnableConfig) -> Dict[str, A
         raise
 
 
+def _tool_request_turn(state: AgentState) -> bool:
+    """True while the agent may still request a tool: it has tools, no tool result has come back
+    yet, and the step budget fits this model call plus one tool call (see ``route_after_generate``).
+
+    On such a turn the strict final-output schema must not be sent: providers that enforce it
+    (e.g. Gemini) make the ``{"tool_calls": [...]}`` request impossible to express.
+    """
+    return (
+        bool(state.get("allowed_tools"))
+        and not state.get("tool_results_count")
+        and state.get("step_count", 0) + 2 <= state.get("max_steps", 10)
+    )
+
+
 async def generate_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Execute model generation via LiteLLM client."""
     configurable = config.get("configurable", {})
@@ -137,10 +151,12 @@ async def generate_node(state: AgentState, config: RunnableConfig) -> Dict[str, 
     # Build ChatMessage sequence
     chat_messages = [ChatMessage(role=m["role"], content=m["content"]) for m in state.get("messages", [])]
 
-    # Structured output spec if output_schema is provided
+    # Strict final-output schema, except on a tool-request turn: there JSON object mode keeps the
+    # reply parseable as either a tool request or a report (validate_output still checks the schema).
     output_schema = state.get("output_schema")
+    tool_turn = bool(output_schema) and _tool_request_turn(state)
     structured_output: Optional[StructuredOutputSpec] = None
-    if output_schema:
+    if output_schema and not tool_turn:
         schema_name = f"{state.get('agent_slug', 'agent')}_output".replace("-", "_")
         structured_output = StructuredOutputSpec(
             name=schema_name,
@@ -185,6 +201,7 @@ async def generate_node(state: AgentState, config: RunnableConfig) -> Dict[str, 
             messages=chat_messages,
             temperature=state.get("parameters", {}).get("temperature", 0.1),
             structured_output=structured_output,
+            json_mode=tool_turn,
         )
 
         # Track tokens and usage accurately from provider response; do not fabricate missing tokens
@@ -383,6 +400,7 @@ async def execute_tools_node(state: AgentState, config: RunnableConfig) -> Dict[
             "messages": updated_messages,
             "pending_tool_calls": [],
             "step_count": new_step_count,
+            "tool_results_count": state.get("tool_results_count", 0) + len(pending_calls),
         }
     except (Exception, asyncio.CancelledError) as exc:
         err_msg = "Task was cancelled" if isinstance(exc, asyncio.CancelledError) else str(exc)

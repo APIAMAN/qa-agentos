@@ -1,0 +1,4 @@
+{"time":"2026-11-14T15:00:00Z","level":"info","msg":"pricing request","sku":"SKU-1"}
+{"time":"2026-11-14T15:00:01Z","level":"error","msg":"price calculation failed","exception":{"type":"TypeError","message":"Cannot read properties of undefined (reading 'quantity')","stack":["at applyDiscount (/srv/pricing/discounts.js:14:20)","at quote (/srv/pricing/quote.js:30:7)"]}}
+{"time":"2026-11-14T15:00:02Z","level":"error","msg":"price calculation failed","exception":{"type":"TypeError","message":"Cannot read properties of undefined (reading 'quantity')","stack":["at applyDiscount (/srv/pricing/discounts.js:14:20)","at quote (/srv/pricing/quote.js:30:7)"]}}
+{"time":"2026-11-14T15:00:03Z","level":"warn","msg":"serving cached price","sku":"SKU-1"}

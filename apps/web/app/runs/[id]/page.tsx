@@ -625,6 +625,15 @@ export default function RunDetailPage() {
           </div>
 
           <div className="flex items-center gap-2">
+            <Link
+              href={`/runs/${runId}/report`}
+              className="p-2 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 hover:bg-slate-800 hover:text-white transition-colors text-xs flex items-center gap-1.5"
+              title="Run report"
+              data-testid="run-report-link"
+            >
+              <FileText className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Report</span>
+            </Link>
             <button
               onClick={() => fetchRunDetail()}
               className="p-2 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 hover:bg-slate-800 hover:text-white transition-colors text-xs flex items-center gap-1.5"

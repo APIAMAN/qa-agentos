@@ -239,7 +239,9 @@ class ArtifactsService:
         return data, content_type, art.name
 
 
-async def store_run_output_artifact(db: AsyncSession, run: Run, output: Dict[str, Any]) -> None:
+async def store_run_output_artifact(
+    db: AsyncSession, run: Run, output: Dict[str, Any], name: Optional[str] = None
+) -> None:
     """Executor output sink: persist a succeeded run's output as a JSON artifact.
 
     Adds the artifact row to the caller's transaction (no commit) and raises on failure,
@@ -250,7 +252,7 @@ async def store_run_output_artifact(db: AsyncSession, run: Run, output: Dict[str
         db=db,
         identity=None,
         project_id=run.project_id,
-        name=f"testcases-{str(run.id)[:8]}.json",
+        name=name or f"testcases-{str(run.id)[:8]}.json",
         artifact_type="json",
         data=raw_bytes,
         run_id=run.id,

@@ -1,0 +1,30 @@
+# Bug Analyzer evaluation gates (evals/README.md). A metric listed for a mode is mandatory in that
+# mode: below `min` fails the gate (exit 1); unable to compute fails the gate too (exit 2).
+# Raise thresholds deliberately, never lower them to turn a red build green.
+dataset: bug-analyzer/v1
+metrics:
+  severity_accuracy:      # AC1: correct severity on >= 9/10 golden cases
+    min: 0.90
+    modes: [reference, replay, live]
+  category_accuracy:
+    min: 0.70
+    modes: [reference, replay, live]
+  signature_accuracy:     # primary signature = the one log.parse identifies
+    min: 0.90
+    modes: [reference, replay, live]
+  grounding_rate:         # every cited signature came from log.parse (no invented evidence)
+    min: 1.00
+    modes: [reference, replay, live]
+  duplicate_recall:       # AC2: labeled duplicates land in the existing cluster
+    min: 1.00
+    modes: [reference, replay, live]
+  duplicate_precision:    # AC2: labeled distinct bugs are never merged
+    min: 1.00
+    modes: [reference, replay, live]
+  geval_faithfulness:     # AC4: mean G-Eval faithfulness (LLM judge; live only)
+    min: 0.70
+    modes: [live]
+# Cosine threshold used when replaying duplicate detection. The fake embedder value is calibrated on
+# this dataset; real-model runs use DUPLICATE_SIMILARITY_THRESHOLD (calibrate it after D1).
+duplicate_threshold:
+  fake: 0.80

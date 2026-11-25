@@ -66,9 +66,15 @@ class InlineDispatcher(RunDispatcher):
         model_resolver: Optional[ModelResolver] = None,
         checkpointer: Optional[Any] = None,
         output_sink: Optional[OutputSink] = None,
+        tool_implementations: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.session_factory = session_factory
         self.output_sink = output_sink
+        if tool_implementations is None:
+            from qa_agentos.modules.bugs.tools import make_tool_implementations
+
+            tool_implementations = make_tool_implementations(session_factory)
+        self.tool_implementations = tool_implementations
         self.litellm_client = litellm_client
         self.model_resolver = model_resolver
         from langgraph.checkpoint.memory import MemorySaver
@@ -82,13 +88,13 @@ class InlineDispatcher(RunDispatcher):
         litellm_client = LiteLLMClient.from_settings(app_settings)
         policy = ProviderPolicy.from_settings(app_settings)
         resolver = ModelResolver(policy)
-        from qa_agentos.modules.artifacts.service import store_run_output_artifact
+        from qa_agentos.modules.runs.output import run_output_sink
 
         return cls(
             session_factory=session_factory,
             litellm_client=litellm_client,
             model_resolver=resolver,
-            output_sink=store_run_output_artifact,
+            output_sink=run_output_sink,
         )
 
     def is_in_flight(self, run_id: uuid.UUID) -> bool:
@@ -140,6 +146,7 @@ class InlineDispatcher(RunDispatcher):
                     model_resolver=self.model_resolver,
                     checkpointer=self.checkpointer,
                     output_sink=self.output_sink,
+                    tool_implementations=self.tool_implementations,
                 )
                 await executor.execute_run(run)
                 await commit_and_publish(session)

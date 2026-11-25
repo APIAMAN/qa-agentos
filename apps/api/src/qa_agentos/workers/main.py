@@ -23,7 +23,8 @@ from qa_agentos.core.database import AsyncSessionLocal
 from qa_agentos.core.errors import APIError
 from qa_agentos.core.logging import setup_logging
 from qa_agentos.models.domain import Run
-from qa_agentos.modules.artifacts.service import store_run_output_artifact
+from qa_agentos.modules.bugs.tools import make_tool_implementations
+from qa_agentos.modules.runs.output import run_output_sink
 from qa_agentos.modules.runs.recovery import fail_run_if_owned, reap_stale_runs
 from qa_agentos.modules.runs.sweeper import sweep_outbox
 from qa_agentos.runtime.events import (
@@ -219,7 +220,8 @@ async def execute_agent_run(
     litellm_client: Optional[LiteLLMClient] = None,
     model_resolver: Optional[ModelResolver] = None,
     checkpointer_factory: Optional[Callable[[], AbstractAsyncContextManager[Any]]] = None,
-    output_sink: Optional[OutputSink] = store_run_output_artifact,
+    output_sink: Optional[OutputSink] = run_output_sink,
+    tool_implementations: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Execute a run with fenced claims, durable checkpoints and guaranteed terminal states."""
     run_id_val = input_data.get("run_id") if isinstance(input_data, dict) else None
@@ -265,6 +267,11 @@ async def execute_agent_run(
                         checkpointer=checkpointer,
                         assigned_attempt=fencing_attempt,
                         output_sink=output_sink,
+                        tool_implementations=(
+                            tool_implementations
+                            if tool_implementations is not None
+                            else make_tool_implementations(session_factory)
+                        ),
                     )
                     result = await executor.execute_run(run)
         except NonRetryableException:

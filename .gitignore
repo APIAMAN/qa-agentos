@@ -57,3 +57,7 @@ Thumbs.db
 data/
 minio_data/
 postgres_data/
+
+# Graphify generated cache
+graphify-out/cache/
+graphify-out/.graphify_partition_cache.json
